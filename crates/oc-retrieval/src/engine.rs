@@ -20,6 +20,8 @@ pub struct SearchQuery {
     pub graph_depth: u32,
     pub bm25_pool_size: usize,
     pub exact_match_pool_size: usize,
+    pub query_vector: Option<Vec<f32>>,
+    pub vector_pool_size: usize,
 }
 
 impl SearchQuery {
@@ -33,6 +35,8 @@ impl SearchQuery {
             graph_depth: 2,
             bm25_pool_size: 100,
             exact_match_pool_size: 50,
+            query_vector: None,
+            vector_pool_size: 50,
         }
     }
 
@@ -84,7 +88,10 @@ impl<'a> RetrievalEngine<'a> {
         // Signal 1: BM25 full-text search
         self.collect_bm25(query, &mut candidates);
 
-        // Signal 2: Exact symbol name match
+        // Signal 2: Vector k-NN search
+        self.collect_vector(query, &mut candidates);
+
+        // Signal 3: Exact symbol name match
         self.collect_exact_match(query, &mut candidates);
 
         // Collect seed IDs (direct signal hits) before graph expansion
@@ -152,6 +159,38 @@ impl<'a> RetrievalEngine<'a> {
             entry.score += rrf_score;
             if !entry.signals.contains(&"bm25".to_string()) {
                 entry.signals.push("bm25".to_string());
+            }
+        }
+    }
+
+    /// Vector k-NN signal: query the vector store, assign RRF scores by rank.
+    fn collect_vector(
+        &self,
+        query: &SearchQuery,
+        candidates: &mut HashMap<SymbolId, ScoredCandidate>,
+    ) {
+        let query_vec = match &query.query_vector {
+            Some(v) => v,
+            None => return,
+        };
+
+        let hits = match self.storage.vector().search_knn(query_vec, query.vector_pool_size) {
+            Ok(h) => h,
+            Err(_) => return, // graceful degradation
+        };
+
+        for (rank, hit) in hits.iter().enumerate() {
+            let rrf_score = 1.0 / (rank as f64 + 1.0 + RRF_K);
+            let entry = candidates
+                .entry(hit.symbol_id)
+                .or_insert_with(|| ScoredCandidate {
+                    symbol_id: hit.symbol_id,
+                    score: 0.0,
+                    signals: Vec::new(),
+                });
+            entry.score += rrf_score;
+            if !entry.signals.contains(&"vector".to_string()) {
+                entry.signals.push("vector".to_string());
             }
         }
     }
@@ -559,6 +598,8 @@ mod tests {
         assert_eq!(q.graph_depth, 2);
         assert_eq!(q.bm25_pool_size, 100);
         assert_eq!(q.exact_match_pool_size, 50);
+        assert!(q.query_vector.is_none());
+        assert_eq!(q.vector_pool_size, 50);
     }
 
     #[test]
@@ -708,5 +749,89 @@ mod tests {
             assert_eq!(a.symbol_id, b.symbol_id);
             assert!((a.score - b.score).abs() < 1e-10);
         }
+    }
+
+    // --- Vector signal tests ---
+
+    fn setup_storage_vec(tmp: &TempDir) -> StorageManager {
+        StorageManager::open_with_dimension(tmp.path(), 4).unwrap()
+    }
+
+    #[test]
+    fn vector_only_search() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage_vec(&tmp);
+
+        let sym = make_symbol("embed_func", "embed_func", "src/embed.py", 0, 100, Language::Python);
+        mgr.graph_mut().insert_symbols(&[sym.clone()], 1000).unwrap();
+        mgr.vector_mut().add_vector(sym.id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+
+        // Query with vector only, no text that would match BM25/exact
+        let mut query = SearchQuery::new("zzz_no_match_zzz");
+        query.query_vector = Some(vec![1.0, 0.0, 0.0, 0.0]);
+        query.enable_graph_expansion = false;
+        let results = engine.search(&query).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].symbol_id, sym.id);
+        assert!(results[0].match_signals.contains(&"vector".to_string()));
+        assert!(!results[0].match_signals.contains(&"bm25".to_string()));
+        assert!(!results[0].match_signals.contains(&"exact".to_string()));
+    }
+
+    #[test]
+    fn multi_signal_with_vector() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage_vec(&tmp);
+
+        let sym = make_symbol("process_data", "process_data", "src/main.py", 0, 100, Language::Python);
+        mgr.graph_mut().insert_symbols(&[sym.clone()], 1000).unwrap();
+        mgr.fulltext_mut().add_document(&sym, Some("def process_data(): pass")).unwrap();
+        mgr.fulltext_mut().commit().unwrap();
+        mgr.vector_mut().add_vector(sym.id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+
+        let mut query = SearchQuery::new("process_data");
+        query.query_vector = Some(vec![1.0, 0.0, 0.0, 0.0]);
+        query.enable_graph_expansion = false;
+        let results = engine.search(&query).unwrap();
+
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r.symbol_id, sym.id);
+        // Should have all three signals
+        assert!(r.match_signals.contains(&"bm25".to_string()));
+        assert!(r.match_signals.contains(&"exact".to_string()));
+        assert!(r.match_signals.contains(&"vector".to_string()));
+
+        // Score should be higher than any single signal alone
+        let single_rrf = rrf_score(0);
+        assert!(r.score > single_rrf, "Multi-signal score {} should exceed single signal {}", r.score, single_rrf);
+    }
+
+    #[test]
+    fn vector_graceful_degradation_empty_store() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage_vec(&tmp);
+
+        let sym = make_symbol("some_func", "some_func", "src/main.py", 0, 100, Language::Python);
+        mgr.graph_mut().insert_symbols(&[sym.clone()], 1000).unwrap();
+        mgr.fulltext_mut().add_document(&sym, Some("def some_func(): pass")).unwrap();
+        mgr.fulltext_mut().commit().unwrap();
+        // Intentionally NOT adding any vectors
+
+        let engine = RetrievalEngine::new(&mgr);
+
+        let mut query = SearchQuery::new("some_func");
+        query.query_vector = Some(vec![1.0, 0.0, 0.0, 0.0]);
+        query.enable_graph_expansion = false;
+        let results = engine.search(&query).unwrap();
+
+        // Should still get BM25/exact results, no panic from empty vector store
+        assert!(!results.is_empty());
+        assert!(!results[0].match_signals.contains(&"vector".to_string()));
     }
 }

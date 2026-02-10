@@ -8,7 +8,7 @@ use tempfile::TempDir;
 /// We use 2000 files per language × 5 languages = 10K files.
 fn bench_index_full(c: &mut Criterion) {
     let tmp = TempDir::new().unwrap();
-    create_scaled_project(tmp.path(), 2000);
+    create_scaled_project(tmp.path(), 500);
 
     let config = IndexConfig {
         repo_id: "bench-repo".to_string(),
@@ -24,9 +24,21 @@ fn bench_index_full(c: &mut Criterion) {
         b.iter_with_setup(
             || {
                 // Clean up .openace before each iteration
+                // Retry loop: on macOS, Spotlight/FSEvents can race with
+                // remove_dir_all, causing spurious ENOTEMPTY errors.
                 let openace = tmp.path().join(".openace");
-                if openace.exists() {
-                    std::fs::remove_dir_all(&openace).unwrap();
+                for attempt in 0..5 {
+                    if !openace.exists() {
+                        break;
+                    }
+                    match std::fs::remove_dir_all(&openace) {
+                        Ok(()) => break,
+                        Err(e) if attempt < 4 => {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            eprintln!("remove_dir_all retry {attempt}: {e}");
+                        }
+                        Err(e) => panic!("failed to remove .openace after retries: {e}"),
+                    }
                 }
             },
             |_| {

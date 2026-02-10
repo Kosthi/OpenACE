@@ -158,6 +158,26 @@ pub fn update_file(
     let new_relations = parse_output.relations;
     let content_hash = xxhash_rust::xxh3::xxh3_64(&content);
 
+    // Build body text map from source bytes for fulltext indexing
+    let body_map: HashMap<SymbolId, String> = new_symbols
+        .iter()
+        .filter_map(|sym| {
+            let start = sym.byte_range.start;
+            let end = sym.byte_range.end.min(content.len());
+            if start < end {
+                let body = String::from_utf8_lossy(&content[start..end]);
+                let capped = if body.len() > 10240 {
+                    &body[..10240]
+                } else {
+                    &body
+                };
+                Some((sym.id, capped.to_string()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
     // Get old symbols from SQLite
     let old_symbols = storage.graph().get_symbols_by_file(rel_path)?;
 
@@ -241,10 +261,12 @@ pub fn update_file(
 
     // Add new documents for added and modified symbols
     for sym in &diff.added {
-        storage.fulltext_mut().add_document(sym, None)?;
+        let body = body_map.get(&sym.id).map(|s| s.as_str());
+        storage.fulltext_mut().add_document(sym, body)?;
     }
     for sym in &diff.modified {
-        storage.fulltext_mut().add_document(sym, None)?;
+        let body = body_map.get(&sym.id).map(|s| s.as_str());
+        storage.fulltext_mut().add_document(sym, body)?;
     }
 
     Ok(report)

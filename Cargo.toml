@@ -6,6 +6,7 @@ members = [
     "crates/oc-indexer",
     "crates/oc-retrieval",
     "crates/oc-bench",
+    "crates/oc-python",
 ]
 resolver = "2"
 

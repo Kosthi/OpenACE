@@ -23,6 +23,7 @@ enum FileOutcome {
         content_hash: u64,
         file_size: u64,
         language: oc_core::Language,
+        source_bytes: Vec<u8>,
     },
     Skipped(SkipReason),
     Failed(String, String),
@@ -94,6 +95,7 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
                         content_hash,
                         file_size,
                         language: lang,
+                        source_bytes: content,
                     }
                 }
                 Err(e) => {
@@ -120,6 +122,7 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
 
     let mut all_symbols: Vec<CodeSymbol> = Vec::new();
     let mut all_relations: Vec<oc_core::CodeRelation> = Vec::new();
+    let mut all_body_map: HashMap<oc_core::SymbolId, String> = HashMap::new();
     let mut file_metas: Vec<FileMetadata> = Vec::new();
 
     let now = chrono_like_now();
@@ -133,10 +136,26 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
                 content_hash,
                 file_size,
                 language,
+                source_bytes,
             } => {
                 let sym_count = symbols.len();
                 total_symbols += sym_count;
                 files_indexed += 1;
+
+                // Build body text map from source bytes
+                for sym in &symbols {
+                    let start = sym.byte_range.start;
+                    let end = sym.byte_range.end.min(source_bytes.len());
+                    if start < end {
+                        let body = String::from_utf8_lossy(&source_bytes[start..end]);
+                        let capped = if body.len() > 10240 {
+                            &body[..10240]
+                        } else {
+                            &body
+                        };
+                        all_body_map.insert(sym.id, capped.to_string());
+                    }
+                }
 
                 file_metas.push(FileMetadata {
                     path: rel_path,
@@ -209,11 +228,10 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
 
     // Index symbols into Tantivy fulltext
     for sym in &all_symbols {
-        // We pass None for body since we don't retain the source text per-symbol here.
-        // The body content was already used for body_hash computation in the parser.
+        let body = all_body_map.get(&sym.id).map(|s| s.as_str());
         storage
             .fulltext_mut()
-            .add_document(sym, None)
+            .add_document(sym, body)
             .map_err(|e| IndexerError::PipelineFailed {
                 stage: "fulltext_index".to_string(),
                 reason: e.to_string(),

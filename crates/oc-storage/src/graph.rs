@@ -240,6 +240,32 @@ impl GraphStore {
         Ok(results)
     }
 
+    /// List all symbols with pagination, ordered by ID for deterministic iteration.
+    pub fn list_symbols(&self, limit: usize, offset: usize) -> Result<Vec<CodeSymbol>, StorageError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, name, qualified_name, kind, language, file_path, \
+             line_start, line_end, byte_start, byte_end, \
+             signature, doc_comment, body_hash \
+             FROM symbols ORDER BY id LIMIT ?1 OFFSET ?2",
+        )?;
+        let mut rows = stmt.query(params![limit as i64, offset as i64])?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next()? {
+            results.push(row_to_symbol(row)?);
+        }
+        Ok(results)
+    }
+
+    /// Count total number of symbols in the store.
+    pub fn count_symbols(&self) -> Result<usize, StorageError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM symbols",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     /// Delete a symbol by ID. Relations are cascaded via ON DELETE CASCADE.
     pub fn delete_symbol(&mut self, id: SymbolId) -> Result<bool, StorageError> {
         let affected = self.conn.execute(
@@ -992,5 +1018,62 @@ mod tests {
             .traverse_khop(hub.id, 1, 10, TraversalDirection::Outgoing)
             .unwrap();
         assert!(hits.len() <= 10);
+    }
+
+    #[test]
+    fn list_symbols_pagination() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        // Insert 10 symbols
+        let symbols: Vec<CodeSymbol> = (0..10)
+            .map(|i| make_symbol(&format!("sym_{}", i), "src/a.py", i * 100, (i + 1) * 100))
+            .collect();
+        store.insert_symbols(&symbols, 1000).unwrap();
+
+        // Page 1: first 3
+        let page1 = store.list_symbols(3, 0).unwrap();
+        assert_eq!(page1.len(), 3);
+
+        // Page 2: next 3
+        let page2 = store.list_symbols(3, 3).unwrap();
+        assert_eq!(page2.len(), 3);
+
+        // No overlap between pages
+        let page1_ids: Vec<_> = page1.iter().map(|s| s.id).collect();
+        let page2_ids: Vec<_> = page2.iter().map(|s| s.id).collect();
+        for id in &page1_ids {
+            assert!(!page2_ids.contains(id));
+        }
+
+        // All 10
+        let all = store.list_symbols(100, 0).unwrap();
+        assert_eq!(all.len(), 10);
+
+        // Beyond end
+        let empty = store.list_symbols(10, 100).unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn count_symbols_accuracy() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        assert_eq!(store.count_symbols().unwrap(), 0);
+
+        let symbols: Vec<CodeSymbol> = (0..5)
+            .map(|i| make_symbol(&format!("sym_{}", i), "src/a.py", i * 100, (i + 1) * 100))
+            .collect();
+        store.insert_symbols(&symbols, 1000).unwrap();
+        assert_eq!(store.count_symbols().unwrap(), 5);
+
+        // Delete one
+        store.delete_symbol(symbols[0].id).unwrap();
+        assert_eq!(store.count_symbols().unwrap(), 4);
+    }
+
+    #[test]
+    fn list_symbols_empty_table() {
+        let store = GraphStore::open_in_memory().unwrap();
+        let result = store.list_symbols(10, 0).unwrap();
+        assert!(result.is_empty());
+        assert_eq!(store.count_symbols().unwrap(), 0);
     }
 }
