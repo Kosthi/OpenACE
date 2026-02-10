@@ -49,10 +49,14 @@ impl EngineBinding {
     #[pyo3(signature = (project_root, embedding_dim=None))]
     fn new(project_root: &str, embedding_dim: Option<usize>) -> PyResult<Self> {
         let path = PathBuf::from(project_root);
-        let dim = embedding_dim.unwrap_or(384);
 
-        let mgr = StorageManager::open_with_dimension(&path, dim)
-            .map_err(|e| PyRuntimeError::new_err(format!("failed to open storage: {e}")))?;
+        let mgr = match embedding_dim {
+            Some(dim) => StorageManager::open_with_dimension(&path, dim),
+            None => StorageManager::open(&path),
+        }
+        .map_err(|e| PyRuntimeError::new_err(format!("failed to open storage: {e}")))?;
+
+        let dim = embedding_dim.unwrap_or_else(|| mgr.vector().dimension());
 
         let repo_id = project_root.to_string();
 
@@ -79,6 +83,7 @@ impl EngineBinding {
             let config = IndexConfig {
                 repo_id,
                 batch_size: 1000,
+                embedding_dim: dim,
             };
             let report = oc_indexer::index(&path, &config)
                 .map(PyIndexReport::from)

@@ -11,7 +11,8 @@ def create_reranker(backend: str = "rule_based", **kwargs: Any) -> Reranker:
     """Create a reranker.
 
     Args:
-        backend: Reranker type - "rule_based", "cross_encoder", "cohere", or "openai".
+        backend: Reranker type - "rule_based", "cross_encoder", "cohere", "openai",
+            "siliconflow", or "api".
         **kwargs: Provider-specific arguments.
 
     Returns:
@@ -36,8 +37,18 @@ def create_reranker(backend: str = "rule_based", **kwargs: Any) -> Reranker:
         from openace.reranking.llm_backend import LLMReranker
 
         return LLMReranker(provider="openai", **kwargs)
+    elif backend == "siliconflow":
+        from openace.reranking.api_reranker import APIReranker
+
+        kwargs.setdefault("base_url", "https://api.siliconflow.cn/v1")
+        kwargs.setdefault("model", "Qwen/Qwen3-Reranker-8B")
+        return APIReranker(**kwargs)
+    elif backend == "api":
+        from openace.reranking.api_reranker import APIReranker
+
+        return APIReranker(**kwargs)
     else:
         raise ValueError(
             f"Unknown reranker backend: {backend!r}. "
-            f"Supported: 'rule_based', 'cross_encoder', 'cohere', 'openai'"
+            f"Supported: 'rule_based', 'cross_encoder', 'cohere', 'openai', 'siliconflow', 'api'"
         )

@@ -42,7 +42,7 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
     let total_files_scanned = scan_result.files.len();
 
     // 2. Open storage
-    let mut storage = StorageManager::open(project_path)?;
+    let mut storage = StorageManager::open_with_dimension(project_path, config.embedding_dim)?;
 
     // 3. Clear existing data for a clean full reindex.
     // This prevents ghost entries from deleted files and Tantivy index bloat.

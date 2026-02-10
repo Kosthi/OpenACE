@@ -6,6 +6,41 @@ import sys
 
 import click
 
+EMBEDDING_CHOICES = ["local", "openai", "siliconflow", "none"]
+RERANKER_CHOICES = ["auto", "siliconflow", "cohere", "openai", "cross_encoder", "rule_based", "none"]
+
+# Mapping: embedding backend -> default reranker backend
+_AUTO_RERANKER = {
+    "siliconflow": "siliconflow",
+    "openai": "rule_based",
+    "local": "rule_based",
+    "none": "none",
+}
+
+
+def _build_engine_kwargs(embedding: str, reranker: str):
+    """Build Engine constructor kwargs from CLI options."""
+    provider = None
+    if embedding != "none":
+        from openace.embedding.factory import create_provider
+        provider = create_provider(embedding)
+
+    # Resolve reranker
+    reranker_backend = reranker if reranker != "auto" else _AUTO_RERANKER.get(embedding, "none")
+    reranker_obj = None
+    if reranker_backend != "none":
+        from openace.reranking.factory import create_reranker
+        reranker_obj = create_reranker(reranker_backend)
+
+    kwargs = {
+        "embedding_provider": provider,
+        "reranker": reranker_obj,
+    }
+    if provider is not None:
+        kwargs["embedding_dim"] = provider.dimension
+
+    return kwargs
+
 
 @click.group()
 @click.version_option(package_name="openace")
@@ -16,9 +51,11 @@ def main():
 
 @main.command()
 @click.argument("path", default=".", type=click.Path(exists=True))
-@click.option("--embedding", type=click.Choice(["local", "openai", "none"]), default="none",
+@click.option("--embedding", type=click.Choice(EMBEDDING_CHOICES), default="none",
               help="Embedding provider to use.")
-def index(path: str, embedding: str):
+@click.option("--reranker", type=click.Choice(RERANKER_CHOICES), default="auto",
+              help="Reranker backend (default: auto, matches embedding).")
+def index(path: str, embedding: str, reranker: str):
     """Index a project directory."""
     from pathlib import Path
     from openace.engine import Engine
@@ -26,12 +63,8 @@ def index(path: str, embedding: str):
     project_path = str(Path(path).resolve())
     click.echo(f"Indexing {project_path}...")
 
-    provider = None
-    if embedding != "none":
-        from openace.embedding.factory import create_provider
-        provider = create_provider(embedding)
-
-    engine = Engine(project_path, embedding_provider=provider)
+    engine_kwargs = _build_engine_kwargs(embedding, reranker)
+    engine = Engine(project_path, **engine_kwargs)
     report = engine.index()
 
     click.echo(f"\nIndexing complete:")
@@ -48,16 +81,21 @@ def index(path: str, embedding: str):
 @click.argument("query")
 @click.option("--path", "-p", default=".", type=click.Path(exists=True),
               help="Project path.")
+@click.option("--embedding", type=click.Choice(EMBEDDING_CHOICES), default="none",
+              help="Embedding provider for vector search.")
+@click.option("--reranker", type=click.Choice(RERANKER_CHOICES), default="auto",
+              help="Reranker backend (default: auto, matches embedding).")
 @click.option("--limit", "-n", default=10, help="Max results.")
 @click.option("--language", "-l", default=None, help="Language filter.")
 @click.option("--file-path", "-f", default=None, help="File path prefix filter.")
-def search(query: str, path: str, limit: int, language: str, file_path: str):
+def search(query: str, path: str, embedding: str, reranker: str, limit: int, language: str, file_path: str):
     """Search for symbols in an indexed project."""
     from pathlib import Path
     from openace.engine import Engine
 
     project_path = str(Path(path).resolve())
-    engine = Engine(project_path)
+    engine_kwargs = _build_engine_kwargs(embedding, reranker)
+    engine = Engine(project_path, **engine_kwargs)
     results = engine.search(query, limit=limit, language=language, file_path=file_path)
 
     if not results:
@@ -65,10 +103,13 @@ def search(query: str, path: str, limit: int, language: str, file_path: str):
         return
 
     for i, r in enumerate(results, 1):
+        score_str = f"score={r.score:.4f}"
+        if r.rerank_score is not None:
+            score_str += f" rerank={r.rerank_score:.4f}"
         click.echo(
             f"{i}. {r.name} ({r.kind}) "
             f"[{', '.join(r.match_signals)}] "
-            f"score={r.score:.4f}"
+            f"{score_str}"
         )
         click.echo(f"   {r.file_path}:{r.line_range[0]}-{r.line_range[1]}")
         click.echo(f"   {r.qualified_name}")
@@ -80,9 +121,11 @@ def search(query: str, path: str, limit: int, language: str, file_path: str):
 
 @main.command()
 @click.argument("path", default=".", type=click.Path(exists=True))
-@click.option("--embedding", type=click.Choice(["local", "openai", "none"]), default="none",
+@click.option("--embedding", type=click.Choice(EMBEDDING_CHOICES), default="none",
               help="Embedding provider.")
-def serve(path: str, embedding: str):
+@click.option("--reranker", type=click.Choice(RERANKER_CHOICES), default="auto",
+              help="Reranker backend (default: auto, matches embedding).")
+def serve(path: str, embedding: str, reranker: str):
     """Start MCP server on stdio."""
     import asyncio
     from pathlib import Path
@@ -92,12 +135,8 @@ def serve(path: str, embedding: str):
     project_path = str(Path(path).resolve())
     click.echo(f"Starting OpenACE MCP server for {project_path}", err=True)
 
-    provider = None
-    if embedding != "none":
-        from openace.embedding.factory import create_provider
-        provider = create_provider(embedding)
-
-    engine = Engine(project_path, embedding_provider=provider)
+    engine_kwargs = _build_engine_kwargs(embedding, reranker)
+    engine = Engine(project_path, **engine_kwargs)
 
     # Index on startup
     click.echo("Indexing project...", err=True)

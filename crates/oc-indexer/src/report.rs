@@ -7,6 +7,8 @@ pub struct IndexConfig {
     pub repo_id: String,
     /// Batch size for SQLite bulk inserts (default: 1000).
     pub batch_size: usize,
+    /// Embedding vector dimension (default: 384).
+    pub embedding_dim: usize,
 }
 
 impl Default for IndexConfig {
@@ -14,6 +16,7 @@ impl Default for IndexConfig {
         Self {
             repo_id: String::new(),
             batch_size: 1000,
+            embedding_dim: 384,
         }
     }
 }

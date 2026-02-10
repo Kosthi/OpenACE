@@ -19,11 +19,13 @@ class OpenAIEmbedder:
         model: str = "text-embedding-3-small",
         dim: int = 1536,
         api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
         batch_size: int = 2048,
     ):
         self._model = model
         self._dimension = dim
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self._base_url = base_url
         self._batch_size = batch_size
         self._client = None
 
@@ -46,7 +48,10 @@ class OpenAIEmbedder:
                 "OpenAI API key required. Set OPENAI_API_KEY environment variable "
                 "or pass api_key parameter."
             )
-        self._client = OpenAI(api_key=self._api_key)
+        kwargs = {"api_key": self._api_key}
+        if self._base_url:
+            kwargs["base_url"] = self._base_url
+        self._client = OpenAI(**kwargs)
         return self._client
 
     def embed(self, texts: list[str]) -> "numpy.ndarray":

@@ -79,7 +79,7 @@ class Engine:
         project_root: str | os.PathLike,
         *,
         embedding_provider: Optional[EmbeddingProvider] = None,
-        embedding_dim: int = 384,
+        embedding_dim: Optional[int] = None,
         reranker: Optional[Reranker] = None,
         rerank_pool_size: int = 50,
     ):
@@ -88,7 +88,8 @@ class Engine:
         Args:
             project_root: Path to the project directory.
             embedding_provider: Optional embedding provider for vector search.
-            embedding_dim: Dimension of embedding vectors (default 384).
+            embedding_dim: Dimension of embedding vectors. If None, auto-detected
+                from existing index metadata or defaults to 384.
             reranker: Optional reranker for two-stage search.
             rerank_pool_size: Number of candidates to retrieve before reranking.
         """

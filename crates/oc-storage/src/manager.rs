@@ -20,6 +20,9 @@ fn is_sqlite_corruption(err: &rusqlite::Error) -> bool {
 /// Default vector dimension (placeholder; real dimension comes from the embedding model).
 const DEFAULT_VECTOR_DIMENSION: usize = 384;
 
+/// Metadata file name stored inside `.openace/`.
+const META_FILE: &str = "meta.json";
+
 /// Unified facade over GraphStore, VectorStore, and FullTextStore.
 ///
 /// Owns the `.openace/` directory and coordinates initialization, corruption
@@ -37,8 +40,12 @@ impl StorageManager {
     /// If the directory exists but any backend fails integrity checks
     /// (schema version mismatch, corrupted SQLite, unusable indexes), the
     /// entire `.openace/` directory is purged and re-initialized.
+    ///
+    /// Reads the vector dimension from the metadata file if it exists,
+    /// otherwise uses the default (384).
     pub fn open(project_root: &Path) -> Result<Self, StorageError> {
-        Self::open_with_dimension(project_root, DEFAULT_VECTOR_DIMENSION)
+        let dim = Self::detect_dimension(project_root);
+        Self::open_with_dimension(project_root, dim)
     }
 
     /// Open or create with an explicit vector dimension.
@@ -49,13 +56,51 @@ impl StorageManager {
         let root = project_root.join(".openace");
 
         match Self::try_open(&root, vector_dimension) {
-            Ok(mgr) => Ok(mgr),
+            Ok(mgr) => {
+                mgr.save_meta(vector_dimension);
+                Ok(mgr)
+            }
             Err(e) if Self::should_purge(&e) => {
                 Self::purge(&root)?;
-                Self::try_open(&root, vector_dimension)
+                let mgr = Self::try_open(&root, vector_dimension)?;
+                mgr.save_meta(vector_dimension);
+                Ok(mgr)
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Detect the vector dimension from an existing `.openace/meta.json`.
+    /// Returns the default dimension if the file doesn't exist or can't be read.
+    fn detect_dimension(project_root: &Path) -> usize {
+        let meta_path = project_root.join(".openace").join(META_FILE);
+        if let Ok(data) = std::fs::read_to_string(&meta_path) {
+            // Simple JSON parsing: look for "embedding_dim": <number>
+            if let Some(pos) = data.find("\"embedding_dim\"") {
+                let rest = &data[pos..];
+                if let Some(colon) = rest.find(':') {
+                    let after_colon = rest[colon + 1..].trim_start();
+                    // Parse the number (stop at comma, brace, or whitespace)
+                    let num_str: String = after_colon
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect();
+                    if let Ok(dim) = num_str.parse::<usize>() {
+                        if dim > 0 {
+                            return dim;
+                        }
+                    }
+                }
+            }
+        }
+        DEFAULT_VECTOR_DIMENSION
+    }
+
+    /// Save vector dimension to `.openace/meta.json`.
+    fn save_meta(&self, vector_dimension: usize) {
+        let meta_path = self.root.join(META_FILE);
+        let content = format!("{{\"embedding_dim\": {}}}\n", vector_dimension);
+        let _ = std::fs::write(&meta_path, content);
     }
 
     /// Attempt to open all three backends from an `.openace/` directory.
