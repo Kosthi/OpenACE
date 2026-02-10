@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "openace"
+version = "0.1.0"
+description = "AI-native code intelligence engine"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+onnx = ["onnxruntime>=1.16", "tokenizers>=0.15", "numpy>=1.24"]
+openai = ["openai>=1.0"]
+mcp = ["mcp>=1.0"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
+
+[project.scripts]
+openace = "openace.cli:main"
+
+[tool.maturin]
+module-name = "openace._openace"
+python-source = "python"
+manifest-path = "crates/oc-python/Cargo.toml"
+features = ["pyo3/extension-module"]

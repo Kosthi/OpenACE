@@ -1,0 +1,17 @@
+[package]
+name = "oc-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "_openace"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.24", features = ["extension-module"] }
+oc-core = { workspace = true }
+oc-storage = { workspace = true }
+oc-indexer = { workspace = true }
+oc-retrieval = { workspace = true }
