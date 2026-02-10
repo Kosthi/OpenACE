@@ -122,9 +122,9 @@ def search(query: str, path: str, embedding: str, reranker: str, limit: int, lan
 @main.command()
 @click.argument("path", default=".", type=click.Path(exists=True))
 @click.option("--embedding", type=click.Choice(EMBEDDING_CHOICES), default="none",
-              help="Embedding provider.")
+              envvar="OPENACE_EMBEDDING", help="Embedding provider.")
 @click.option("--reranker", type=click.Choice(RERANKER_CHOICES), default="auto",
-              help="Reranker backend (default: auto, matches embedding).")
+              envvar="OPENACE_RERANKER", help="Reranker backend (default: auto, matches embedding).")
 def serve(path: str, embedding: str, reranker: str):
     """Start MCP server on stdio."""
     import asyncio
@@ -132,11 +132,23 @@ def serve(path: str, embedding: str, reranker: str):
     from openace.engine import Engine
     from openace.server.app import create_server
 
+    try:
+        import mcp.server.stdio  # noqa: F401
+    except ImportError:
+        raise click.ClickException(
+            "MCP server requires the mcp package. Install with: pip install openace[mcp]"
+        )
+
     project_path = str(Path(path).resolve())
     click.echo(f"Starting OpenACE MCP server for {project_path}", err=True)
 
-    engine_kwargs = _build_engine_kwargs(embedding, reranker)
-    engine = Engine(project_path, **engine_kwargs)
+    try:
+        engine_kwargs = _build_engine_kwargs(embedding, reranker)
+        engine = Engine(project_path, **engine_kwargs)
+    except click.ClickException:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e))
 
     # Index on startup
     click.echo("Indexing project...", err=True)
@@ -150,15 +162,7 @@ def serve(path: str, embedding: str, reranker: str):
     server = create_server(engine)
 
     async def run():
-        try:
-            from mcp.server.stdio import stdio_server
-        except ImportError:
-            click.echo(
-                "MCP server requires the mcp package. "
-                "Install with: pip install openace[mcp]",
-                err=True,
-            )
-            sys.exit(1)
+        from mcp.server.stdio import stdio_server
 
         async with stdio_server() as (read_stream, write_stream):
             await server.run(read_stream, write_stream, server.create_initialization_options())

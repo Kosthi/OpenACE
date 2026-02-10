@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "openace": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["openace[mcp]", "serve", "."],
+      "env": {
+        "OPENACE_EMBEDDING": "${OPENACE_EMBEDDING}",
+        "OPENACE_RERANKER": "${OPENACE_RERANKER}",
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        "COHERE_API_KEY": "${COHERE_API_KEY}"
+      }
+    }
+  }
+}
