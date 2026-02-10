@@ -1,0 +1,45 @@
+[package]
+name = "oc-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "End-to-end tests and benchmarks for OpenACE"
+
+[dependencies]
+oc-core.workspace = true
+oc-parser.workspace = true
+oc-storage.workspace = true
+oc-indexer.workspace = true
+oc-retrieval.workspace = true
+tempfile.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+tempfile.workspace = true
+rand.workspace = true
+
+[[bench]]
+name = "parser_throughput"
+harness = false
+
+[[bench]]
+name = "graph_khop"
+harness = false
+
+[[bench]]
+name = "fulltext_bm25"
+harness = false
+
+[[bench]]
+name = "vector_knn"
+harness = false
+
+[[bench]]
+name = "index_full"
+harness = false
+
+[[bench]]
+name = "index_incremental"
+harness = false

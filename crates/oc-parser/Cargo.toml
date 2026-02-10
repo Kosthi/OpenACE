@@ -1,0 +1,18 @@
+[package]
+name = "oc-parser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Multi-language AST parser for OpenACE"
+
+[dependencies]
+oc-core.workspace = true
+tree-sitter.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-java.workspace = true
+xxhash-rust.workspace = true
+thiserror.workspace = true

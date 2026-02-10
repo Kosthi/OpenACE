@@ -1,0 +1,15 @@
+[package]
+name = "oc-retrieval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Multi-signal retrieval engine for OpenACE"
+
+[dependencies]
+oc-core.workspace = true
+oc-storage.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

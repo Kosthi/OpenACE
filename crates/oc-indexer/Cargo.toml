@@ -1,0 +1,22 @@
+[package]
+name = "oc-indexer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Indexing pipeline for OpenACE (full + incremental + watcher)"
+
+[dependencies]
+oc-core.workspace = true
+oc-parser.workspace = true
+oc-storage.workspace = true
+rayon.workspace = true
+ignore.workspace = true
+notify.workspace = true
+notify-debouncer-mini.workspace = true
+crossbeam-channel.workspace = true
+xxhash-rust.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
