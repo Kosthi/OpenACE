@@ -7,7 +7,7 @@ use xxhash_rust::xxh3::xxh3_128;
 use crate::error::StorageError;
 
 /// Current schema version. Increment when schema changes.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// Direction for graph traversal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +84,17 @@ impl GraphStore {
     }
 
     // -- Symbol CRUD --
+
+    /// Delete all data from the symbols, relations, and files tables.
+    ///
+    /// Used before a full reindex to ensure no stale data from deleted files
+    /// persists. The repositories table is preserved.
+    pub fn clear(&mut self) -> Result<(), StorageError> {
+        self.conn.execute_batch(
+            "DELETE FROM relations; DELETE FROM symbols; DELETE FROM files;",
+        )?;
+        Ok(())
+    }
 
     /// Insert symbols in batched transactions.
     /// `batch_size`: 1000 for bulk, 100 for incremental.
@@ -550,7 +561,7 @@ fn create_schema(conn: &Connection) -> Result<(), StorageError> {
         CREATE TABLE IF NOT EXISTS relations (
             id          BLOB PRIMARY KEY,
             source_id   BLOB NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
-            target_id   BLOB NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+            target_id   BLOB NOT NULL,
             kind        INTEGER NOT NULL,
             file_path   TEXT NOT NULL,
             line        INTEGER NOT NULL,

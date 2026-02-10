@@ -44,7 +44,24 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
     // 2. Open storage
     let mut storage = StorageManager::open(project_path)?;
 
-    // 3. Parallel parse
+    // 3. Clear existing data for a clean full reindex.
+    // This prevents ghost entries from deleted files and Tantivy index bloat.
+    storage
+        .graph_mut()
+        .clear()
+        .map_err(|e| IndexerError::PipelineFailed {
+            stage: "clear_graph".to_string(),
+            reason: e.to_string(),
+        })?;
+    storage
+        .fulltext_mut()
+        .clear()
+        .map_err(|e| IndexerError::PipelineFailed {
+            stage: "clear_fulltext".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    // 4. Parallel parse
     let outcomes: Vec<FileOutcome> = scan_result
         .files
         .par_iter()
@@ -113,7 +130,7 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
         })
         .collect();
 
-    // 4. Sequential store
+    // 5. Sequential store
     let mut files_indexed = 0usize;
     let mut files_skipped: HashMap<SkipReason, usize> = HashMap::new();
     let mut files_failed = 0usize;
@@ -148,11 +165,7 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
                     let end = sym.byte_range.end.min(source_bytes.len());
                     if start < end {
                         let body = String::from_utf8_lossy(&source_bytes[start..end]);
-                        let capped = if body.len() > 10240 {
-                            &body[..10240]
-                        } else {
-                            &body
-                        };
+                        let capped = oc_core::truncate_utf8_bytes(&body, 10240);
                         all_body_map.insert(sym.id, capped.to_string());
                     }
                 }
@@ -183,11 +196,12 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
     // Build set of known symbol IDs for relation filtering
     let known_ids: HashSet<oc_core::SymbolId> = all_symbols.iter().map(|s| s.id).collect();
 
-    // Filter relations to only those whose source and target are known.
-    // Cross-file references to unparsed/external symbols are dropped.
+    // Filter relations to only those whose source is a known symbol.
+    // Target may be unresolved (cross-file or external) — we allow dangling
+    // target references since the FK constraint on target_id has been removed.
     let valid_relations: Vec<_> = all_relations
         .iter()
-        .filter(|r| known_ids.contains(&r.source_id) && known_ids.contains(&r.target_id))
+        .filter(|r| known_ids.contains(&r.source_id))
         .collect();
     let valid_relation_count = valid_relations.len();
 

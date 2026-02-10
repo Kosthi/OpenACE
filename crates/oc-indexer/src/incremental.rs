@@ -100,6 +100,30 @@ pub fn update_file(
 ) -> Result<IncrementalReport, IndexerError> {
     let abs_path = project_path.join(rel_path);
 
+    // Validate that the resolved path stays within the project root.
+    // If the file doesn't exist, canonicalize will fail — fall through to the
+    // fs::read below which handles NotFound by calling delete_file.
+    match abs_path.canonicalize() {
+        Ok(canonical) => {
+            let canonical_root = project_path.canonicalize().map_err(IndexerError::Io)?;
+            if !canonical.starts_with(&canonical_root) {
+                return Err(IndexerError::PipelineFailed {
+                    stage: "path_validation".into(),
+                    reason: format!("path outside project root: {}", rel_path),
+                });
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File doesn't exist — let the read below handle it
+        }
+        Err(e) => {
+            return Err(IndexerError::PipelineFailed {
+                stage: "path_validation".into(),
+                reason: format!("cannot canonicalize path: {e}"),
+            });
+        }
+    }
+
     // Read the file; if it was deleted between event and processing, fall back to delete
     let content = match fs::read(&abs_path) {
         Ok(c) => c,
@@ -166,11 +190,7 @@ pub fn update_file(
             let end = sym.byte_range.end.min(content.len());
             if start < end {
                 let body = String::from_utf8_lossy(&content[start..end]);
-                let capped = if body.len() > 10240 {
-                    &body[..10240]
-                } else {
-                    &body
-                };
+                let capped = oc_core::truncate_utf8_bytes(&body, 10240);
                 Some((sym.id, capped.to_string()))
             } else {
                 None
@@ -221,14 +241,15 @@ pub fn update_file(
     // Delete remaining relations sourced from this file, then insert all new ones.
     delete_relations_for_file(storage, rel_path)?;
 
-    // Build set of all known symbol IDs for relation validation
-    let all_current_symbols = storage.graph().get_symbols_by_file(rel_path)?;
-    let known_ids: HashSet<SymbolId> = all_current_symbols.iter().map(|s| s.id).collect();
-
-    // Filter and insert new relations (only those where both endpoints are known)
+    // Validate and insert new relations.
+    // Source must exist in the graph store (it was just inserted/updated for
+    // this file). Target may be cross-file or unresolved — we allow dangling
+    // target references since the FK constraint on target_id has been removed.
     let valid_relations: Vec<&CodeRelation> = new_relations
         .iter()
-        .filter(|r| known_ids.contains(&r.source_id) && known_ids.contains(&r.target_id))
+        .filter(|r| {
+            storage.graph().get_symbol(r.source_id).ok().flatten().is_some()
+        })
         .collect();
 
     if !valid_relations.is_empty() {
@@ -245,7 +266,7 @@ pub fn update_file(
         content_hash,
         language,
         size_bytes: file_size,
-        symbol_count: all_current_symbols.len() as u32,
+        symbol_count: new_symbols.len() as u32,
         last_indexed: now.clone(),
         last_modified: now,
     })?;

@@ -19,13 +19,18 @@ pub struct VectorHit {
 /// Dimension is fixed at creation time.
 ///
 /// Since usearch keys are u64 but SymbolId is u128, we maintain a bidirectional
-/// mapping (lower-64-bit key <-> full SymbolId). The mapping is persisted as a
-/// sidecar file alongside the usearch index.
+/// mapping using counter-based surrogate keys. Each SymbolId is assigned a
+/// monotonically increasing u64 key, eliminating hash collision risk.
+/// The mapping is persisted as a sidecar file alongside the usearch index.
 pub struct VectorStore {
     index: Index,
     dimension: usize,
     /// Maps usearch u64 key -> full SymbolId.
     key_to_id: HashMap<u64, SymbolId>,
+    /// Maps full SymbolId -> usearch u64 key (reverse lookup).
+    id_to_key: HashMap<SymbolId, u64>,
+    /// Next surrogate key to allocate.
+    next_key: u64,
 }
 
 impl VectorStore {
@@ -36,6 +41,8 @@ impl VectorStore {
             index,
             dimension,
             key_to_id: HashMap::new(),
+            id_to_key: HashMap::new(),
+            next_key: 0,
         })
     }
 
@@ -55,11 +62,15 @@ impl VectorStore {
                     actual: loaded_dim,
                 });
             }
-            let key_to_id = load_key_map(path)?;
+            let (key_to_id, next_key) = load_key_map(path)?;
+            let id_to_key: HashMap<SymbolId, u64> =
+                key_to_id.iter().map(|(&k, &v)| (v, k)).collect();
             Ok(Self {
                 index,
                 dimension,
                 key_to_id,
+                id_to_key,
+                next_key,
             })
         } else {
             Self::new(dimension)
@@ -93,7 +104,11 @@ impl VectorStore {
                 actual: vector.len(),
             });
         }
-        let key = symbol_id_to_key(symbol_id);
+        let key = *self.id_to_key.entry(symbol_id).or_insert_with(|| {
+            let k = self.next_key;
+            self.next_key += 1;
+            k
+        });
         // Remove existing entry first to ensure idempotent add (single entry per key).
         if self.index.contains(key) {
             let _ = self.index.remove(key);
@@ -118,15 +133,17 @@ impl VectorStore {
 
     /// Remove the vector for the given symbol. Returns true if it existed.
     pub fn remove_vector(&mut self, symbol_id: SymbolId) -> Result<bool, StorageError> {
-        let key = symbol_id_to_key(symbol_id);
-        if !self.index.contains(key) {
-            return Ok(false);
+        let key = match self.id_to_key.remove(&symbol_id) {
+            Some(k) => k,
+            None => return Ok(false),
+        };
+        if self.index.contains(key) {
+            self.index.remove(key).map_err(|e| {
+                StorageError::VectorIndexUnavailable {
+                    reason: format!("remove failed: {e}"),
+                }
+            })?;
         }
-        self.index.remove(key).map_err(|e| {
-            StorageError::VectorIndexUnavailable {
-                reason: format!("remove failed: {e}"),
-            }
-        })?;
         self.key_to_id.remove(&key);
         Ok(true)
     }
@@ -175,14 +192,9 @@ impl VectorStore {
             .map_err(|e| StorageError::VectorIndexUnavailable {
                 reason: format!("save failed: {e}"),
             })?;
-        save_key_map(path, &self.key_to_id)?;
+        save_key_map(path, &self.key_to_id, self.next_key)?;
         Ok(())
     }
-}
-
-/// Map a SymbolId (u128) to a usearch Key (u64) using the lower 64 bits.
-fn symbol_id_to_key(id: SymbolId) -> u64 {
-    id.0 as u64
 }
 
 fn create_index(dimension: usize) -> Result<Index, StorageError> {
@@ -205,11 +217,16 @@ fn key_map_path(index_path: &Path) -> std::path::PathBuf {
 }
 
 /// Persist the u64->SymbolId mapping as a flat binary file.
-/// Format: [count: u64] [key: u64, id_lo: u64, id_hi: u64] * count
-fn save_key_map(index_path: &Path, map: &HashMap<u64, SymbolId>) -> Result<(), StorageError> {
+/// Format v2: [next_key: u64] [count: u64] [key: u64, id_lo: u64, id_hi: u64] * count
+fn save_key_map(
+    index_path: &Path,
+    map: &HashMap<u64, SymbolId>,
+    next_key: u64,
+) -> Result<(), StorageError> {
     use std::io::Write;
     let path = key_map_path(index_path);
-    let mut buf = Vec::with_capacity(8 + map.len() * 24);
+    let mut buf = Vec::with_capacity(16 + map.len() * 24);
+    buf.extend_from_slice(&next_key.to_le_bytes());
     buf.extend_from_slice(&(map.len() as u64).to_le_bytes());
     for (&key, &sym_id) in map {
         buf.extend_from_slice(&key.to_le_bytes());
@@ -222,10 +239,11 @@ fn save_key_map(index_path: &Path, map: &HashMap<u64, SymbolId>) -> Result<(), S
 }
 
 /// Load the u64->SymbolId mapping from the sidecar file.
-fn load_key_map(index_path: &Path) -> Result<HashMap<u64, SymbolId>, StorageError> {
+/// Supports both v1 (no next_key prefix) and v2 (with next_key prefix) formats.
+fn load_key_map(index_path: &Path) -> Result<(HashMap<u64, SymbolId>, u64), StorageError> {
     let path = key_map_path(index_path);
     if !path.exists() {
-        return Ok(HashMap::new());
+        return Ok((HashMap::new(), 0));
     }
     let data = std::fs::read(&path)?;
     if data.len() < 8 {
@@ -233,6 +251,28 @@ fn load_key_map(index_path: &Path) -> Result<HashMap<u64, SymbolId>, StorageErro
             reason: "keymap file too short".to_string(),
         });
     }
+
+    // Detect format: v2 has next_key prefix (16 bytes header), v1 has count-only (8 bytes header).
+    // Try v2 first: read next_key and count, check if file size matches.
+    if data.len() >= 16 {
+        let next_key = u64::from_le_bytes(data[0..8].try_into().unwrap());
+        let count = u64::from_le_bytes(data[8..16].try_into().unwrap()) as usize;
+        if data.len() == 16 + count * 24 {
+            // v2 format
+            let mut map = HashMap::with_capacity(count);
+            for i in 0..count {
+                let offset = 16 + i * 24;
+                let key = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+                let lo = u64::from_le_bytes(data[offset + 8..offset + 16].try_into().unwrap());
+                let hi = u64::from_le_bytes(data[offset + 16..offset + 24].try_into().unwrap());
+                let sym_id = SymbolId((hi as u128) << 64 | lo as u128);
+                map.insert(key, sym_id);
+            }
+            return Ok((map, next_key));
+        }
+    }
+
+    // Fall back to v1 format: [count: u64] [key: u64, id_lo: u64, id_hi: u64] * count
     let count = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
     if data.len() != 8 + count * 24 {
         return Err(StorageError::VectorIndexUnavailable {
@@ -240,6 +280,7 @@ fn load_key_map(index_path: &Path) -> Result<HashMap<u64, SymbolId>, StorageErro
         });
     }
     let mut map = HashMap::with_capacity(count);
+    let mut max_key: u64 = 0;
     for i in 0..count {
         let offset = 8 + i * 24;
         let key = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
@@ -247,8 +288,11 @@ fn load_key_map(index_path: &Path) -> Result<HashMap<u64, SymbolId>, StorageErro
         let hi = u64::from_le_bytes(data[offset + 16..offset + 24].try_into().unwrap());
         let sym_id = SymbolId((hi as u128) << 64 | lo as u128);
         map.insert(key, sym_id);
+        if key >= max_key {
+            max_key = key + 1;
+        }
     }
-    Ok(map)
+    Ok((map, max_key))
 }
 
 #[cfg(test)]
@@ -283,6 +327,27 @@ mod tests {
         let results = store.search_knn(&[1.0, 0.0, 0.0, 0.0], 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].symbol_id, id);
+    }
+
+    #[test]
+    fn test_no_collision_different_upper_bits() {
+        // Two SymbolIds that share the same lower 64 bits but differ in upper 64.
+        // With the old truncation approach, these would collide.
+        let mut store = VectorStore::new(4).unwrap();
+        let id1 = SymbolId(0x0000_0000_0000_0001_FFFF_FFFF_FFFF_FFFF);
+        let id2 = SymbolId(0x0000_0000_0000_0002_FFFF_FFFF_FFFF_FFFF);
+
+        store.add_vector(id1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        store.add_vector(id2, &[0.0, 1.0, 0.0, 0.0]).unwrap();
+
+        // Both should exist independently
+        assert_eq!(store.len(), 2);
+
+        let results = store.search_knn(&[1.0, 0.0, 0.0, 0.0], 2).unwrap();
+        assert_eq!(results.len(), 2);
+        let ids: Vec<SymbolId> = results.iter().map(|h| h.symbol_id).collect();
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
     }
 
     #[test]
@@ -362,6 +427,39 @@ mod tests {
             let results = store.search_knn(&[1.0, 0.0, 0.0, 0.0], 1).unwrap();
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].symbol_id, id1);
+        }
+    }
+
+    #[test]
+    fn test_surrogate_key_persistence() {
+        // Verify that next_key is persisted correctly across save/load cycles
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vectors.usearch");
+        let id1 = SymbolId(100);
+        let id2 = SymbolId(200);
+
+        // Create, add, save
+        {
+            let mut store = VectorStore::new(4).unwrap();
+            store.add_vector(id1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+            store.save(&path).unwrap();
+            assert_eq!(store.next_key, 1);
+        }
+
+        // Reload, add more, save again
+        {
+            let mut store = VectorStore::open(&path, 4).unwrap();
+            assert_eq!(store.next_key, 1);
+            store.add_vector(id2, &[0.0, 1.0, 0.0, 0.0]).unwrap();
+            assert_eq!(store.next_key, 2);
+            store.save(&path).unwrap();
+        }
+
+        // Final reload: both entries present, next_key is 2
+        {
+            let store = VectorStore::open(&path, 4).unwrap();
+            assert_eq!(store.len(), 2);
+            assert_eq!(store.next_key, 2);
         }
     }
 

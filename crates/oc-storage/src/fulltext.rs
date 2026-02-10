@@ -259,6 +259,19 @@ impl FullTextStore {
         })
     }
 
+    /// Delete all documents from the index.
+    ///
+    /// Used before a full reindex to ensure no stale documents from deleted
+    /// files persist. Commits immediately and refreshes the reader.
+    pub fn clear(&mut self) -> Result<(), StorageError> {
+        self.writer.delete_all_documents()?;
+        self.writer.commit()?;
+        self.reader.reload()?;
+        self.pending_count = 0;
+        self.last_commit = Instant::now();
+        Ok(())
+    }
+
     /// Add a symbol document to the index.
     ///
     /// `body` is the optional source text of the symbol body, truncated to 10KB.
@@ -268,7 +281,7 @@ impl FullTextStore {
         body: Option<&str>,
     ) -> Result<(), StorageError> {
         let id_hex = format!("{}", symbol.id);
-        let content = body.map(|b| truncate_utf8(b, CONTENT_MAX_BYTES)).unwrap_or("");
+        let content = body.map(|b| oc_core::truncate_utf8_bytes(b, CONTENT_MAX_BYTES)).unwrap_or("");
 
         self.writer.add_document(doc!(
             self.f_symbol_id => id_hex,
@@ -397,18 +410,6 @@ impl Drop for FullTextStore {
     fn drop(&mut self) {
         let _ = self.commit();
     }
-}
-
-/// Truncate a string to at most `max_bytes` bytes on a valid UTF-8 boundary.
-fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 /// Parse a 32-hex-char SymbolId.
@@ -687,11 +688,12 @@ mod tests {
 
     #[test]
     fn truncate_utf8_on_boundary() {
-        assert_eq!(truncate_utf8("hello", 3), "hel");
-        assert_eq!(truncate_utf8("hello", 100), "hello");
+        use oc_core::truncate_utf8_bytes;
+        assert_eq!(truncate_utf8_bytes("hello", 3), "hel");
+        assert_eq!(truncate_utf8_bytes("hello", 100), "hello");
         // Multi-byte: 'é' is 2 bytes
-        assert_eq!(truncate_utf8("café", 4), "caf");
-        assert_eq!(truncate_utf8("café", 5), "café");
+        assert_eq!(truncate_utf8_bytes("café", 4), "caf");
+        assert_eq!(truncate_utf8_bytes("café", 5), "café");
     }
 
     // --- Persistence ---

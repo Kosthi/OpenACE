@@ -117,6 +117,12 @@ class Engine:
 
         return report
 
+    def _validate_path(self, path: str) -> None:
+        """Validate that a relative path stays within the project root."""
+        resolved = (Path(self._project_root) / path).resolve()
+        if not str(resolved).startswith(self._project_root):
+            raise SearchError(f"path outside project root: {path}")
+
     def search(
         self,
         query: str,
@@ -137,6 +143,9 @@ class Engine:
             List of SearchResult sorted by relevance score.
         """
         try:
+            if file_path is not None:
+                self._validate_path(file_path)
+
             query_vector = None
             if self._embedding_provider is not None:
                 vectors = self._embedding_provider.embed([query])
@@ -180,6 +189,7 @@ class Engine:
             List of Symbol objects in the file.
         """
         try:
+            self._validate_path(path)
             py_syms = self._core.get_file_outline(path)
             return [_convert_symbol(s) for s in py_syms]
         except Exception as e:
