@@ -34,6 +34,7 @@ class SearchResult:
     file_path: str
     line_range: tuple[int, int]
     score: float
+    rerank_score: Optional[float] = None
     match_signals: list[str] = field(default_factory=list)
     related_symbols: list[SearchResult] = field(default_factory=list)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -9,8 +10,11 @@ from typing import TYPE_CHECKING, Optional
 from openace.exceptions import IndexingError, OpenACEError, SearchError
 from openace.types import IndexReport, SearchResult, Symbol
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from openace.embedding.protocol import EmbeddingProvider
+    from openace.reranking.protocol import Reranker
 
 
 def _convert_symbol(py_sym) -> Symbol:
@@ -76,6 +80,8 @@ class Engine:
         *,
         embedding_provider: Optional[EmbeddingProvider] = None,
         embedding_dim: int = 384,
+        reranker: Optional[Reranker] = None,
+        rerank_pool_size: int = 50,
     ):
         """Initialize the engine.
 
@@ -83,12 +89,21 @@ class Engine:
             project_root: Path to the project directory.
             embedding_provider: Optional embedding provider for vector search.
             embedding_dim: Dimension of embedding vectors (default 384).
+            reranker: Optional reranker for two-stage search.
+            rerank_pool_size: Number of candidates to retrieve before reranking.
         """
         from openace._openace import EngineBinding
 
         self._project_root = str(Path(project_root).resolve())
         self._embedding_provider = embedding_provider
         self._embedding_dim = embedding_dim
+        self._reranker = reranker
+        self._rerank_pool_size = min(rerank_pool_size, 100)
+        if reranker is not None and rerank_pool_size > 100:
+            logger.warning(
+                "rerank_pool_size=%d exceeds Rust upper bound of 100, capped to 100",
+                rerank_pool_size,
+            )
         self._core = EngineBinding(self._project_root, embedding_dim)
 
     @property
@@ -146,19 +161,42 @@ class Engine:
             if file_path is not None:
                 self._validate_path(file_path)
 
+            if limit <= 0:
+                return []
+
             query_vector = None
             if self._embedding_provider is not None:
                 vectors = self._embedding_provider.embed([query])
                 query_vector = vectors[0].tolist()
 
+            # Stage 1: retrieval with expanded pool if reranker is set
+            if self._reranker is not None:
+                retrieval_limit = max(limit, self._rerank_pool_size)
+                retrieval_limit = min(retrieval_limit, 100)  # Rust upper bound
+            else:
+                retrieval_limit = limit
+
             py_results = self._core.search(
                 query,
                 query_vector,
-                limit,
+                retrieval_limit,
                 language,
                 file_path,
             )
-            return [_convert_search_result(r) for r in py_results]
+            results = [_convert_search_result(r) for r in py_results]
+
+            # Stage 2: rerank if reranker is configured
+            if self._reranker is not None:
+                try:
+                    results = self._reranker.rerank(query, results, top_k=limit)
+                except Exception as e:
+                    logger.warning(
+                        "Reranker failed (%s), falling back to original ranking",
+                        type(e).__name__,
+                    )
+                    results = results[:limit]
+
+            return results
         except OpenACEError:
             raise
         except Exception as e:

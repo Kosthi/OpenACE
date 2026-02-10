@@ -16,6 +16,9 @@ dependencies = [
 onnx = ["onnxruntime>=1.16", "tokenizers>=0.15", "numpy>=1.24"]
 openai = ["openai>=1.0"]
 mcp = ["mcp>=1.0"]
+rerank-local = ["onnxruntime>=1.16", "tokenizers>=0.15", "numpy>=1.24", "huggingface_hub>=0.20"]
+rerank-cohere = ["cohere>=5.0"]
+rerank-openai = ["openai>=1.0"]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
 
 [project.scripts]
