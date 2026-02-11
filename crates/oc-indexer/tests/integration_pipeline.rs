@@ -152,6 +152,7 @@ fn integration_index_mixed_language_project() {
     let config = IndexConfig {
         repo_id: "test-repo".to_string(),
         batch_size: 1000,
+        embedding_dim: 384,
     };
 
     let report = index(tmp.path(), &config).unwrap();
@@ -215,6 +216,7 @@ fn integration_index_search_results() {
     let config = IndexConfig {
         repo_id: "test-repo".to_string(),
         batch_size: 1000,
+        embedding_dim: 384,
     };
 
     let _report = index(tmp.path(), &config).unwrap();
@@ -254,6 +256,7 @@ fn integration_empty_project() {
     let config = IndexConfig {
         repo_id: "empty".to_string(),
         batch_size: 1000,
+        embedding_dim: 384,
     };
 
     let report = index(tmp.path(), &config).unwrap();

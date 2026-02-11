@@ -48,6 +48,7 @@ fn incremental_update_modified_file() {
     let config = IndexConfig {
         repo_id: "test-repo".to_string(),
         batch_size: 1000,
+        embedding_dim: 384,
     };
 
     // Full index first
@@ -118,6 +119,7 @@ fn incremental_update_unchanged_file_skipped() {
     let config = IndexConfig {
         repo_id: "test-repo".to_string(),
         batch_size: 1000,
+        embedding_dim: 384,
     };
     index(tmp.path(), &config).unwrap();
 
@@ -142,6 +144,7 @@ fn incremental_delete_file_cleanup() {
     let config = IndexConfig {
         repo_id: "test-repo".to_string(),
         batch_size: 1000,
+        embedding_dim: 384,
     };
     index(tmp.path(), &config).unwrap();
 
@@ -188,6 +191,7 @@ fn incremental_process_events_batch() {
     let config = IndexConfig {
         repo_id: "test-repo".to_string(),
         batch_size: 1000,
+        embedding_dim: 384,
     };
     index(tmp.path(), &config).unwrap();
 
@@ -233,6 +237,7 @@ fn convergence_incremental_vs_full_reindex() {
     let config = IndexConfig {
         repo_id: "test-repo".to_string(),
         batch_size: 1000,
+        embedding_dim: 384,
     };
 
     // Full index
