@@ -14,6 +14,7 @@ fn bench_index_incremental(c: &mut Criterion) {
     let config = IndexConfig {
         repo_id: "bench-repo".to_string(),
         batch_size: 1000,
+        embedding_dim: 384,
     };
 
     // Full index first

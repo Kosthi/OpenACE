@@ -13,6 +13,7 @@ fn bench_index_full(c: &mut Criterion) {
     let config = IndexConfig {
         repo_id: "bench-repo".to_string(),
         batch_size: 1000,
+        embedding_dim: 384,
     };
 
     let mut group = c.benchmark_group("index_full");
