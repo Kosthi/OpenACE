@@ -146,6 +146,7 @@ class Engine:
         limit: int = 10,
         language: Optional[str] = None,
         file_path: Optional[str] = None,
+        dedupe_by_file: bool = True,
     ) -> list[SearchResult]:
         """Search for symbols using multi-signal retrieval.
 
@@ -154,6 +155,8 @@ class Engine:
             limit: Maximum number of results.
             language: Optional language filter (e.g., "python").
             file_path: Optional file path prefix filter.
+            dedupe_by_file: If True, keep only the highest-scoring symbol
+                per file so that results cover more distinct files.
 
         Returns:
             List of SearchResult sorted by relevance score.
@@ -170,9 +173,11 @@ class Engine:
                 vectors = self._embedding_provider.embed([query])
                 query_vector = vectors[0].tolist()
 
-            # Stage 1: retrieval with expanded pool if reranker is set
-            if self._reranker is not None:
-                retrieval_limit = max(limit, self._rerank_pool_size)
+            # Stage 1: retrieval with expanded pool
+            # Expand when reranker or file-dedup is active so we have
+            # enough candidates after filtering.
+            if self._reranker is not None or dedupe_by_file:
+                retrieval_limit = max(limit * 5, self._rerank_pool_size)
                 retrieval_limit = min(retrieval_limit, 100)  # Rust upper bound
             else:
                 retrieval_limit = limit
@@ -189,15 +194,26 @@ class Engine:
             # Stage 2: rerank if reranker is configured
             if self._reranker is not None:
                 try:
-                    results = self._reranker.rerank(query, results, top_k=limit)
+                    results = self._reranker.rerank(
+                        query, results, top_k=retrieval_limit,
+                    )
                 except Exception as e:
                     logger.warning(
                         "Reranker failed (%s), falling back to original ranking",
                         type(e).__name__,
                     )
-                    results = results[:limit]
 
-            return results
+            # Stage 3: file-level dedup — keep highest-scoring symbol per file
+            if dedupe_by_file:
+                seen_files: set[str] = set()
+                deduped: list[SearchResult] = []
+                for r in results:
+                    if r.file_path not in seen_files:
+                        seen_files.add(r.file_path)
+                        deduped.append(r)
+                results = deduped
+
+            return results[:limit]
         except OpenACEError:
             raise
         except Exception as e:
