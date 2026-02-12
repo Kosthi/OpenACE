@@ -12,8 +12,21 @@ from openace.types import IndexReport, SearchResult, Symbol
 
 logger = logging.getLogger(__name__)
 
+# Path segments that indicate a test file
+_TEST_MARKERS = {"test", "tests", "test_", "_test", "spec", "specs", "__tests__"}
+
+
+def _is_test_file(file_path: str) -> bool:
+    """Heuristic: return True if the file path looks like a test file."""
+    parts = file_path.replace("\\", "/").lower().split("/")
+    for part in parts:
+        if part in _TEST_MARKERS or part.startswith("test_") or part.endswith("_test.py"):
+            return True
+    return False
+
 if TYPE_CHECKING:
     from openace.embedding.protocol import EmbeddingProvider
+    from openace.query_expansion import QueryExpander
     from openace.reranking.protocol import Reranker
 
 
@@ -83,6 +96,7 @@ class Engine:
         embedding_dim: Optional[int] = None,
         reranker: Optional[Reranker] = None,
         rerank_pool_size: int = 50,
+        query_expander: Optional[QueryExpander] = None,
     ):
         """Initialize the engine.
 
@@ -93,6 +107,7 @@ class Engine:
                 from existing index metadata or defaults to 384.
             reranker: Optional reranker for two-stage search.
             rerank_pool_size: Number of candidates to retrieve before reranking.
+            query_expander: Optional query expander for improved recall.
         """
         from openace._openace import EngineBinding
 
@@ -101,6 +116,7 @@ class Engine:
         self._embedding_dim = embedding_dim
         self._reranker = reranker
         self._rerank_pool_size = min(rerank_pool_size, 100)
+        self._query_expander = query_expander
         if reranker is not None and rerank_pool_size > 100:
             logger.warning(
                 "rerank_pool_size=%d exceeds Rust upper bound of 100, capped to 100",
@@ -169,6 +185,17 @@ class Engine:
             if limit <= 0:
                 return []
 
+            # Stage 0: query expansion for better BM25 recall
+            search_query = query
+            if self._query_expander is not None:
+                try:
+                    search_query = self._query_expander.expand(query)
+                except Exception as e:
+                    logger.warning(
+                        "Query expansion failed (%s), using original query",
+                        type(e).__name__,
+                    )
+
             query_vector = None
             if self._embedding_provider is not None:
                 vectors = self._embedding_provider.embed([query])
@@ -184,7 +211,7 @@ class Engine:
                 retrieval_limit = limit
 
             py_results = self._core.search(
-                query,
+                search_query,
                 query_vector,
                 retrieval_limit,
                 language,
@@ -204,15 +231,21 @@ class Engine:
                         type(e).__name__,
                     )
 
-            # Stage 3: file-level dedup — keep highest-scoring symbol per file
+            # Stage 3: file-level dedup — keep highest-scoring symbol per file,
+            # preferring source files over test files for diverse results.
             if dedupe_by_file:
                 seen_files: set[str] = set()
-                deduped: list[SearchResult] = []
+                source_results: list[SearchResult] = []
+                test_results: list[SearchResult] = []
                 for r in results:
                     if r.file_path not in seen_files:
                         seen_files.add(r.file_path)
-                        deduped.append(r)
-                results = deduped
+                        if _is_test_file(r.file_path):
+                            test_results.append(r)
+                        else:
+                            source_results.append(r)
+                # Interleave: fill with source files first, then test files
+                results = source_results + test_results
 
             return results[:limit]
         except OpenACEError:

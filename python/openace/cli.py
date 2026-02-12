@@ -8,6 +8,7 @@ import click
 
 EMBEDDING_CHOICES = ["local", "openai", "siliconflow", "voyage", "voyage-code", "none"]
 RERANKER_CHOICES = ["auto", "siliconflow", "cohere", "openai", "cross_encoder", "rule_based", "none"]
+EXPANSION_CHOICES = ["siliconflow", "openai", "none"]
 
 # Mapping: embedding backend -> default reranker backend
 _AUTO_RERANKER = {
@@ -20,7 +21,7 @@ _AUTO_RERANKER = {
 }
 
 
-def _build_engine_kwargs(embedding: str, reranker: str):
+def _build_engine_kwargs(embedding: str, reranker: str, expansion: str = "none"):
     """Build Engine constructor kwargs from CLI options."""
     provider = None
     if embedding != "none":
@@ -34,9 +35,16 @@ def _build_engine_kwargs(embedding: str, reranker: str):
         from openace.reranking.factory import create_reranker
         reranker_obj = create_reranker(reranker_backend)
 
+    # Resolve query expander
+    expander_obj = None
+    if expansion != "none":
+        from openace.query_expansion import create_query_expander
+        expander_obj = create_query_expander(expansion)
+
     kwargs = {
         "embedding_provider": provider,
         "reranker": reranker_obj,
+        "query_expander": expander_obj,
     }
     if provider is not None:
         kwargs["embedding_dim"] = provider.dimension
@@ -87,16 +95,18 @@ def index(path: str, embedding: str, reranker: str):
               help="Embedding provider for vector search.")
 @click.option("--reranker", type=click.Choice(RERANKER_CHOICES), default="auto",
               help="Reranker backend (default: auto, matches embedding).")
+@click.option("--expansion", type=click.Choice(EXPANSION_CHOICES), default="none",
+              help="Query expansion backend for improved recall.")
 @click.option("--limit", "-n", default=10, help="Max results.")
 @click.option("--language", "-l", default=None, help="Language filter.")
 @click.option("--file-path", "-f", default=None, help="File path prefix filter.")
-def search(query: str, path: str, embedding: str, reranker: str, limit: int, language: str, file_path: str):
+def search(query: str, path: str, embedding: str, reranker: str, expansion: str, limit: int, language: str, file_path: str):
     """Search for symbols in an indexed project."""
     from pathlib import Path
     from openace.engine import Engine
 
     project_path = str(Path(path).resolve())
-    engine_kwargs = _build_engine_kwargs(embedding, reranker)
+    engine_kwargs = _build_engine_kwargs(embedding, reranker, expansion)
     engine = Engine(project_path, **engine_kwargs)
     results = engine.search(query, limit=limit, language=language, file_path=file_path)
 
@@ -134,7 +144,9 @@ def search(query: str, path: str, embedding: str, reranker: str, limit: int, lan
               envvar="OPENACE_EMBEDDING", help="Embedding provider.")
 @click.option("--reranker", type=click.Choice(RERANKER_CHOICES), default="auto",
               envvar="OPENACE_RERANKER", help="Reranker backend (default: auto, matches embedding).")
-def serve(path: str, embedding: str, reranker: str):
+@click.option("--expansion", type=click.Choice(EXPANSION_CHOICES), default="none",
+              envvar="OPENACE_EXPANSION", help="Query expansion backend.")
+def serve(path: str, embedding: str, reranker: str, expansion: str):
     """Start MCP server on stdio."""
     import asyncio
     from pathlib import Path
@@ -152,7 +164,7 @@ def serve(path: str, embedding: str, reranker: str):
     click.echo(f"Starting OpenACE MCP server for {project_path}", err=True)
 
     try:
-        engine_kwargs = _build_engine_kwargs(embedding, reranker)
+        engine_kwargs = _build_engine_kwargs(embedding, reranker, expansion)
         engine = Engine(project_path, **engine_kwargs)
     except click.ClickException:
         raise
