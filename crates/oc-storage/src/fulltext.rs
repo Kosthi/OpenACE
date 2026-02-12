@@ -291,7 +291,9 @@ impl FullTextStore {
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
-        let content = format!("{} {}", path_tokens, body_content);
+        // Prepend doc_comment so BM25 can match on documentation terms
+        let doc_comment = symbol.doc_comment.as_deref().unwrap_or("");
+        let content = format!("{} {} {}", path_tokens, doc_comment, body_content);
 
         self.writer.add_document(doc!(
             self.f_symbol_id => id_hex,

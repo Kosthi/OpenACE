@@ -41,7 +41,12 @@ class APIReranker:
 
     @staticmethod
     def _build_document_text(result: SearchResult) -> str:
-        return f"{result.qualified_name} ({result.kind}) {result.name}"
+        parts = [f"{result.file_path} | {result.qualified_name} ({result.kind})"]
+        if result.snippet:
+            # Include first 20 lines of snippet for semantic context
+            snippet_lines = result.snippet.splitlines()[:20]
+            parts.append("\n".join(snippet_lines))
+        return "\n".join(parts)
 
     def rerank(
         self, query: str, results: list[SearchResult], *, top_k: int | None = None

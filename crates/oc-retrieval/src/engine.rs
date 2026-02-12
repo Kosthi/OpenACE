@@ -41,7 +41,7 @@ impl SearchQuery {
     }
 
     fn effective_limit(&self) -> usize {
-        self.limit.min(100)
+        self.limit.min(200)
     }
 
     fn effective_graph_depth(&self) -> u32 {
@@ -613,10 +613,10 @@ mod tests {
     }
 
     #[test]
-    fn limit_capped_at_100() {
+    fn limit_capped_at_200() {
         let mut q = SearchQuery::new("test");
         q.limit = 500;
-        assert_eq!(q.effective_limit(), 100);
+        assert_eq!(q.effective_limit(), 200);
     }
 
     #[test]

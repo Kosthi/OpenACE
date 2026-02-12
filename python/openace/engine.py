@@ -115,11 +115,11 @@ class Engine:
         self._embedding_provider = embedding_provider
         self._embedding_dim = embedding_dim
         self._reranker = reranker
-        self._rerank_pool_size = min(rerank_pool_size, 100)
+        self._rerank_pool_size = min(rerank_pool_size, 200)
         self._query_expander = query_expander
-        if reranker is not None and rerank_pool_size > 100:
+        if reranker is not None and rerank_pool_size > 200:
             logger.warning(
-                "rerank_pool_size=%d exceeds Rust upper bound of 100, capped to 100",
+                "rerank_pool_size=%d exceeds Rust upper bound of 200, capped to 200",
                 rerank_pool_size,
             )
         self._core = EngineBinding(self._project_root, embedding_dim)
@@ -206,7 +206,7 @@ class Engine:
             # enough candidates after filtering.
             if self._reranker is not None or dedupe_by_file:
                 retrieval_limit = max(limit * 5, self._rerank_pool_size)
-                retrieval_limit = min(retrieval_limit, 100)  # Rust upper bound
+                retrieval_limit = min(retrieval_limit, 200)  # Rust upper bound
             else:
                 retrieval_limit = limit
 
