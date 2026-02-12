@@ -109,6 +109,8 @@ pub struct CodeSymbol {
     pub doc_comment: Option<String>,
     /// XXH3-128 lower 64 bits of the symbol body bytes.
     pub body_hash: u64,
+    /// Optional source text of the symbol body (truncated to 10 KB).
+    pub body_text: Option<String>,
 }
 
 #[cfg(test)]

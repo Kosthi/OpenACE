@@ -33,6 +33,7 @@ pub(crate) fn extract(
         line_range: root.start_position().row as u32..root.end_position().row as u32 + 1,
         signature: None,
         doc_comment: None,
+        body_text: None,
         body_hash: ctx.body_hash(root),
     });
 
@@ -100,6 +101,7 @@ fn extract_class(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: Some(format!("class {name}")),
         doc_comment: extract_javadoc(ctx, node),
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -145,6 +147,7 @@ fn extract_interface(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: Some(format!("interface {name}")),
         doc_comment: extract_javadoc(ctx, node),
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -190,6 +193,7 @@ fn extract_enum(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: Some(format!("enum {name}")),
         doc_comment: extract_javadoc(ctx, node),
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -275,7 +279,8 @@ fn extract_enum_body(
                             line_range: child.start_position().row as u32..child.end_position().row as u32 + 1,
                             signature: None,
                             doc_comment: None,
-                            body_hash: ctx.body_hash(child),
+                            body_text: None,
+        body_hash: ctx.body_hash(child),
                         });
                         push_contains(ctx, enum_id, sym_id, child, relations);
                     }
@@ -322,6 +327,7 @@ fn extract_method(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: Some(signature),
         doc_comment: extract_javadoc(ctx, node),
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -386,7 +392,8 @@ fn extract_field(
                         line_range: child.start_position().row as u32..child.end_position().row as u32 + 1,
                         signature: None,
                         doc_comment: None,
-                        body_hash: ctx.body_hash(child),
+                        body_text: None,
+        body_hash: ctx.body_hash(child),
                     });
                     push_contains(ctx, class_id, sym_id, child, relations);
                 }

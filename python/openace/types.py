@@ -37,6 +37,7 @@ class SearchResult:
     rerank_score: Optional[float] = None
     match_signals: list[str] = field(default_factory=list)
     related_symbols: list[SearchResult] = field(default_factory=list)
+    snippet: Optional[str] = None
 
     def __repr__(self) -> str:
         return (

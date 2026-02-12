@@ -211,6 +211,7 @@ mod tests {
             signature: Some(format!("def {name}()")),
             doc_comment: None,
             body_hash: 42,
+            body_text: None,
         }
     }
 

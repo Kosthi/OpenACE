@@ -28,6 +28,8 @@ pub struct PySymbol {
     pub signature: Option<String>,
     #[pyo3(get)]
     pub doc_comment: Option<String>,
+    #[pyo3(get)]
+    pub body_text: Option<String>,
 }
 
 #[pymethods]
@@ -53,6 +55,7 @@ impl From<CodeSymbol> for PySymbol {
             line_end: sym.line_range.end,
             signature: sym.signature,
             doc_comment: sym.doc_comment,
+            body_text: sym.body_text,
         }
     }
 }
@@ -79,6 +82,8 @@ pub struct PySearchResult {
     pub match_signals: Vec<String>,
     #[pyo3(get)]
     pub related_symbols: Vec<PySearchResult>,
+    #[pyo3(get)]
+    pub snippet: Option<String>,
 }
 
 #[pymethods]
@@ -103,6 +108,7 @@ impl From<SearchResult> for PySearchResult {
             score: r.score,
             match_signals: r.match_signals,
             related_symbols: r.related_symbols.into_iter().map(PySearchResult::from).collect(),
+            snippet: r.snippet,
         }
     }
 }

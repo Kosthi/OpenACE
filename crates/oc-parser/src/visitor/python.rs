@@ -37,6 +37,7 @@ pub(crate) fn extract(
         line_range: root.start_position().row as u32..root.end_position().row as u32 + 1,
         signature: None,
         doc_comment: None,
+        body_text: None,
         body_hash: ctx.body_hash(root),
     });
 
@@ -119,6 +120,7 @@ fn extract_class(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: Some(signature),
         doc_comment: doc,
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -191,6 +193,7 @@ fn extract_function(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: Some(signature),
         doc_comment: doc,
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -287,6 +290,7 @@ fn extract_assignment(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: None,
         doc_comment: None,
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 

@@ -178,20 +178,23 @@ pub fn update_file(
 
     // Re-parse
     let parse_output = parse_file(repo_id, rel_path, &content, file_size)?;
-    let new_symbols = parse_output.symbols;
+    let mut new_symbols = parse_output.symbols;
     let new_relations = parse_output.relations;
     let content_hash = xxhash_rust::xxh3::xxh3_64(&content);
 
-    // Build body text map from source bytes for fulltext indexing
+    // Build body text map from source bytes for fulltext indexing,
+    // and populate body_text field on each symbol for storage.
     let body_map: HashMap<SymbolId, String> = new_symbols
-        .iter()
+        .iter_mut()
         .filter_map(|sym| {
             let start = sym.byte_range.start;
             let end = sym.byte_range.end.min(content.len());
             if start < end {
                 let body = String::from_utf8_lossy(&content[start..end]);
                 let capped = oc_core::truncate_utf8_bytes(&body, 10240);
-                Some((sym.id, capped.to_string()))
+                let capped_str = capped.to_string();
+                sym.body_text = Some(capped_str.clone());
+                Some((sym.id, capped_str))
             } else {
                 None
             }
@@ -446,6 +449,7 @@ mod tests {
             signature: Some(format!("def {}()", name)),
             doc_comment: None,
             body_hash,
+            body_text: None,
         }
     }
 

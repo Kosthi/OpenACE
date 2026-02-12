@@ -34,6 +34,7 @@ pub(crate) fn extract(
         line_range: root.start_position().row as u32..root.end_position().row as u32 + 1,
         signature: None,
         doc_comment: None,
+        body_text: None,
         body_hash: ctx.body_hash(root),
     });
 
@@ -131,6 +132,7 @@ fn extract_class(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: Some(signature),
         doc_comment: extract_jsdoc(ctx, node),
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -199,6 +201,7 @@ fn extract_function(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: Some(signature),
         doc_comment: extract_jsdoc(ctx, node),
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -257,6 +260,7 @@ fn extract_method(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: Some(signature),
         doc_comment: extract_jsdoc(ctx, node),
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -307,6 +311,7 @@ fn extract_interface(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: Some(format!("interface {name}")),
         doc_comment: extract_jsdoc(ctx, node),
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -356,6 +361,7 @@ fn extract_type_alias(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: None,
         doc_comment: extract_jsdoc(ctx, node),
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -402,6 +408,7 @@ fn extract_enum(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: Some(format!("enum {name}")),
         doc_comment: extract_jsdoc(ctx, node),
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -592,6 +599,7 @@ fn extract_variable_declarator(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: None,
         doc_comment: None,
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 

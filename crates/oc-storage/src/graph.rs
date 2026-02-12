@@ -7,7 +7,7 @@ use xxhash_rust::xxh3::xxh3_128;
 use crate::error::StorageError;
 
 /// Current schema version. Increment when schema changes.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 /// Direction for graph traversal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,8 +111,8 @@ impl GraphStore {
                     "INSERT OR REPLACE INTO symbols \
                      (id, name, qualified_name, kind, language, file_path, \
                       line_start, line_end, byte_start, byte_end, \
-                      signature, doc_comment, body_hash, created_at, updated_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                      signature, doc_comment, body_hash, body_text, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 )?;
                 for sym in chunk {
                     stmt.execute(params![
@@ -129,6 +129,7 @@ impl GraphStore {
                         sym.signature.as_deref(),
                         sym.doc_comment.as_deref(),
                         sym.body_hash as i64,
+                        sym.body_text.as_deref(),
                         &now,
                         &now,
                     ])?;
@@ -158,7 +159,7 @@ impl GraphStore {
                      name = ?2, qualified_name = ?3, kind = ?4, language = ?5, \
                      file_path = ?6, line_start = ?7, line_end = ?8, \
                      byte_start = ?9, byte_end = ?10, \
-                     signature = ?11, doc_comment = ?12, body_hash = ?13, updated_at = ?14 \
+                     signature = ?11, doc_comment = ?12, body_hash = ?13, body_text = ?14, updated_at = ?15 \
                      WHERE id = ?1",
                 )?;
                 for sym in chunk {
@@ -176,6 +177,7 @@ impl GraphStore {
                         sym.signature.as_deref(),
                         sym.doc_comment.as_deref(),
                         sym.body_hash as i64,
+                        sym.body_text.as_deref(),
                         &now,
                     ])?;
                 }
@@ -190,7 +192,7 @@ impl GraphStore {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, name, qualified_name, kind, language, file_path, \
              line_start, line_end, byte_start, byte_end, \
-             signature, doc_comment, body_hash \
+             signature, doc_comment, body_hash, body_text \
              FROM symbols WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id.as_bytes().as_slice()])?;
@@ -205,7 +207,7 @@ impl GraphStore {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, name, qualified_name, kind, language, file_path, \
              line_start, line_end, byte_start, byte_end, \
-             signature, doc_comment, body_hash \
+             signature, doc_comment, body_hash, body_text \
              FROM symbols WHERE file_path = ?1",
         )?;
         let mut rows = stmt.query(params![file_path])?;
@@ -221,7 +223,7 @@ impl GraphStore {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, name, qualified_name, kind, language, file_path, \
              line_start, line_end, byte_start, byte_end, \
-             signature, doc_comment, body_hash \
+             signature, doc_comment, body_hash, body_text \
              FROM symbols WHERE name = ?1",
         )?;
         let mut rows = stmt.query(params![name])?;
@@ -240,7 +242,7 @@ impl GraphStore {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, name, qualified_name, kind, language, file_path, \
              line_start, line_end, byte_start, byte_end, \
-             signature, doc_comment, body_hash \
+             signature, doc_comment, body_hash, body_text \
              FROM symbols WHERE qualified_name = ?1",
         )?;
         let mut rows = stmt.query(params![qualified_name])?;
@@ -256,7 +258,7 @@ impl GraphStore {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, name, qualified_name, kind, language, file_path, \
              line_start, line_end, byte_start, byte_end, \
-             signature, doc_comment, body_hash \
+             signature, doc_comment, body_hash, body_text \
              FROM symbols ORDER BY id LIMIT ?1 OFFSET ?2",
         )?;
         let mut rows = stmt.query(params![limit as i64, offset as i64])?;
@@ -549,6 +551,7 @@ fn create_schema(conn: &Connection) -> Result<(), StorageError> {
             signature   TEXT,
             doc_comment TEXT,
             body_hash   INTEGER NOT NULL,
+            body_text   TEXT,
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL
         );
@@ -726,6 +729,7 @@ fn row_to_symbol(row: &rusqlite::Row<'_>) -> Result<CodeSymbol, StorageError> {
         signature: row.get(10)?,
         doc_comment: row.get(11)?,
         body_hash: body_hash as u64,
+        body_text: row.get(13)?,
     })
 }
 
@@ -771,6 +775,7 @@ mod tests {
             signature: Some(format!("def {}()", name)),
             doc_comment: None,
             body_hash: 12345,
+            body_text: None,
         }
     }
 

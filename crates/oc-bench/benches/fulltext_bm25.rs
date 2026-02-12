@@ -17,6 +17,7 @@ fn make_symbol(name: &str, file: &str, byte_start: usize, byte_end: usize) -> Co
         signature: Some(format!("def {name}()")),
         doc_comment: None,
         body_hash: 42,
+        body_text: None,
     }
 }
 

@@ -159,14 +159,17 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
                 total_symbols += sym_count;
                 files_indexed += 1;
 
-                // Build body text map from source bytes
-                for sym in &symbols {
+                // Build body text map from source bytes and populate body_text field
+                let mut symbols = symbols;
+                for sym in &mut symbols {
                     let start = sym.byte_range.start;
                     let end = sym.byte_range.end.min(source_bytes.len());
                     if start < end {
                         let body = String::from_utf8_lossy(&source_bytes[start..end]);
                         let capped = oc_core::truncate_utf8_bytes(&body, 10240);
-                        all_body_map.insert(sym.id, capped.to_string());
+                        let capped_str = capped.to_string();
+                        sym.body_text = Some(capped_str.clone());
+                        all_body_map.insert(sym.id, capped_str);
                     }
                 }
 

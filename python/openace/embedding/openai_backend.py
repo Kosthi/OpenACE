@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Optional
 
 
@@ -21,12 +22,20 @@ class OpenAIEmbedder:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         batch_size: int = 2048,
+        send_dimensions: bool = True,
+        extra_body: Optional[dict] = None,
+        max_retries: int = 2,
+        request_delay: float = 0.0,
     ):
         self._model = model
         self._dimension = dim
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self._base_url = base_url
         self._batch_size = batch_size
+        self._send_dimensions = send_dimensions
+        self._extra_body = extra_body
+        self._max_retries = max_retries
+        self._request_delay = request_delay
         self._client = None
 
     @property
@@ -48,11 +57,28 @@ class OpenAIEmbedder:
                 "OpenAI API key required. Set OPENAI_API_KEY environment variable "
                 "or pass api_key parameter."
             )
-        kwargs = {"api_key": self._api_key}
+        kwargs = {"api_key": self._api_key, "max_retries": self._max_retries}
         if self._base_url:
             kwargs["base_url"] = self._base_url
         self._client = OpenAI(**kwargs)
         return self._client
+
+    def _call_with_retry(self, client, kwargs: dict, max_attempts: int = 5) -> list:
+        """Call embeddings API with manual retry for rate limits."""
+        from openai import RateLimitError
+
+        for attempt in range(max_attempts):
+            try:
+                response = client.embeddings.create(**kwargs)
+                return [item.embedding for item in response.data]
+            except RateLimitError:
+                if attempt == max_attempts - 1:
+                    raise
+                wait = min(30 * (2 ** attempt), 120)
+                print(f"  [embed] rate limited, waiting {wait}s "
+                      f"(attempt {attempt + 1}/{max_attempts})")
+                time.sleep(wait)
+        return []
 
     def embed(self, texts: list[str]) -> "numpy.ndarray":
         """Embed texts using OpenAI API.
@@ -68,15 +94,21 @@ class OpenAIEmbedder:
         client = self._get_client()
 
         all_embeddings = []
-        for i in range(0, len(texts), self._batch_size):
+        n_batches = (len(texts) + self._batch_size - 1) // self._batch_size
+        for idx, i in enumerate(range(0, len(texts), self._batch_size)):
+            if self._request_delay > 0 and idx > 0:
+                time.sleep(self._request_delay)
             batch = texts[i : i + self._batch_size]
-            response = client.embeddings.create(
-                input=batch,
-                model=self._model,
-                dimensions=self._dimension,
-            )
-            batch_vecs = [item.embedding for item in response.data]
+            kwargs = {"input": batch, "model": self._model}
+            if self._send_dimensions:
+                kwargs["dimensions"] = self._dimension
+            if self._extra_body:
+                kwargs["extra_body"] = self._extra_body
+            batch_vecs = self._call_with_retry(client, kwargs)
             all_embeddings.extend(batch_vecs)
+            if n_batches > 1:
+                print(f"  [embed] batch {idx + 1}/{n_batches} done "
+                      f"({len(all_embeddings)}/{len(texts)} texts)")
 
         if not all_embeddings:
             return np.zeros((0, self._dimension), dtype=np.float32)

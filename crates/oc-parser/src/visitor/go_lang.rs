@@ -33,6 +33,7 @@ pub(crate) fn extract(
         line_range: root.start_position().row as u32..root.end_position().row as u32 + 1,
         signature: None,
         doc_comment: None,
+        body_text: None,
         body_hash: ctx.body_hash(root),
     });
 
@@ -109,6 +110,7 @@ fn extract_function(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: Some(signature),
         doc_comment: extract_go_doc(ctx, node),
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -169,6 +171,7 @@ fn extract_method(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: Some(signature),
         doc_comment: extract_go_doc(ctx, node),
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -258,6 +261,7 @@ fn extract_type_spec(
         line_range: node.start_position().row as u32..node.end_position().row as u32 + 1,
         signature: Some(sig),
         doc_comment: extract_go_doc(ctx, node),
+        body_text: None,
         body_hash: ctx.body_hash(node),
     });
 
@@ -306,7 +310,8 @@ fn extract_var_or_const(
                     line_range: child.start_position().row as u32..child.end_position().row as u32 + 1,
                     signature: None,
                     doc_comment: None,
-                    body_hash: ctx.body_hash(child),
+                    body_text: None,
+        body_hash: ctx.body_hash(child),
                 });
 
                 push_contains(ctx, scope_id, sym_id, child, relations);

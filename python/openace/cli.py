@@ -6,7 +6,7 @@ import sys
 
 import click
 
-EMBEDDING_CHOICES = ["local", "openai", "siliconflow", "none"]
+EMBEDDING_CHOICES = ["local", "openai", "siliconflow", "voyage", "voyage-code", "none"]
 RERANKER_CHOICES = ["auto", "siliconflow", "cohere", "openai", "cross_encoder", "rule_based", "none"]
 
 # Mapping: embedding backend -> default reranker backend
@@ -14,6 +14,8 @@ _AUTO_RERANKER = {
     "siliconflow": "siliconflow",
     "openai": "rule_based",
     "local": "rule_based",
+    "voyage": "rule_based",
+    "voyage-code": "rule_based",
     "none": "none",
 }
 
@@ -113,6 +115,13 @@ def search(query: str, path: str, embedding: str, reranker: str, limit: int, lan
         )
         click.echo(f"   {r.file_path}:{r.line_range[0]}-{r.line_range[1]}")
         click.echo(f"   {r.qualified_name}")
+        if r.snippet:
+            lines = r.snippet.splitlines()[:30]
+            line_start = r.line_range[0]
+            for j, line in enumerate(lines):
+                click.echo(f"     {line_start + j:>4}\t{line}")
+            if len(r.snippet.splitlines()) > 30:
+                click.echo("     ...")
         if r.related_symbols:
             related = ", ".join(rs.name for rs in r.related_symbols[:3])
             click.echo(f"   Related: {related}")

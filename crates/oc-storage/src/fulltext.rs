@@ -281,13 +281,23 @@ impl FullTextStore {
         body: Option<&str>,
     ) -> Result<(), StorageError> {
         let id_hex = format!("{}", symbol.id);
-        let content = body.map(|b| oc_core::truncate_utf8_bytes(b, CONTENT_MAX_BYTES)).unwrap_or("");
+        let body_content = body.map(|b| oc_core::truncate_utf8_bytes(b, CONTENT_MAX_BYTES)).unwrap_or("");
+
+        // Tokenize file path segments so BM25 can match on directory/file names
+        let path_tokens: String = symbol
+            .file_path
+            .to_string_lossy()
+            .split(|c: char| c == '/' || c == '\\' || c == '.' || c == '_' || c == '-')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let content = format!("{} {}", path_tokens, body_content);
 
         self.writer.add_document(doc!(
             self.f_symbol_id => id_hex,
             self.f_name => symbol.name.as_str(),
             self.f_qualified_name => symbol.qualified_name.as_str(),
-            self.f_content => content,
+            self.f_content => content.as_str(),
             self.f_file_path => symbol.file_path.to_string_lossy().as_ref(),
             self.f_language => symbol.language.name(),
         ))?;
@@ -435,6 +445,7 @@ mod tests {
             signature: None,
             doc_comment: None,
             body_hash: 0,
+            body_text: None,
         }
     }
 
@@ -717,5 +728,29 @@ mod tests {
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0].symbol_id, SymbolId(3000));
         }
+    }
+
+    // --- Path token searchability ---
+
+    #[test]
+    fn path_tokens_searchable() {
+        let mut store = FullTextStore::create_in_ram().unwrap();
+        let mut sym = make_symbol(4000, "detect_formula", "model.mfd.detect_formula", Language::Python);
+        sym.file_path = PathBuf::from("model/mfd/detect_formula.py");
+        store.add_document(&sym, Some("def detect_formula(image, model): pass")).unwrap();
+        store.commit().unwrap();
+
+        // Search by directory name from path
+        let hits = store.search_bm25("mfd", 10, None, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].symbol_id, SymbolId(4000));
+
+        // Search by "model" from path
+        let hits = store.search_bm25("model", 10, None, None).unwrap();
+        assert_eq!(hits.len(), 1);
+
+        // Search by "formula" matches both path token and function name
+        let hits = store.search_bm25("formula", 10, None, None).unwrap();
+        assert_eq!(hits.len(), 1);
     }
 }

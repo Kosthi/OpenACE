@@ -118,12 +118,23 @@ async def _handle_search(engine: Engine, args: dict) -> list:
 
     lines = []
     for i, r in enumerate(results, 1):
-        lines.append(
+        entry = (
             f"{i}. {r.name} ({r.kind})\n"
             f"   File: {r.file_path}:{r.line_range[0]}-{r.line_range[1]}\n"
             f"   Qualified: {r.qualified_name}\n"
             f"   Score: {r.score:.4f} | Signals: {', '.join(r.match_signals)}"
         )
+        if r.snippet:
+            snippet_lines = r.snippet.splitlines()[:30]
+            line_start = r.line_range[0]
+            formatted = "\n".join(
+                f"     {line_start + j:>4}\t{line}"
+                for j, line in enumerate(snippet_lines)
+            )
+            if len(r.snippet.splitlines()) > 30:
+                formatted += "\n     ..."
+            entry += f"\n{formatted}"
+        lines.append(entry)
         if r.related_symbols:
             related_names = [rs.name for rs in r.related_symbols[:5]]
             lines.append(f"   Related: {', '.join(related_names)}")

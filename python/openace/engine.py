@@ -45,6 +45,7 @@ def _convert_search_result(py_result) -> SearchResult:
         score=py_result.score,
         match_signals=list(py_result.match_signals),
         related_symbols=[_convert_search_result(r) for r in py_result.related_symbols],
+        snippet=py_result.snippet,
     )
 
 
@@ -271,7 +272,7 @@ class Engine:
             if not symbols:
                 break
 
-            # Build text for embedding: qualified_name + signature + doc_comment
+            # Build text for embedding: qualified_name + signature + doc_comment + body_text
             texts = []
             ids = []
             for sym in symbols:
@@ -280,6 +281,8 @@ class Engine:
                     parts.append(sym.signature)
                 if sym.doc_comment:
                     parts.append(sym.doc_comment)
+                if sym.body_text:
+                    parts.append(sym.body_text[:2048])
                 texts.append(" ".join(parts))
                 ids.append(sym.id)
 

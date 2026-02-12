@@ -61,6 +61,7 @@ pub struct SearchResult {
     pub score: f64,
     pub match_signals: Vec<String>,
     pub related_symbols: Vec<SearchResult>,
+    pub snippet: Option<String>,
 }
 
 /// Accumulator for per-symbol RRF scoring.
@@ -341,6 +342,12 @@ impl<'a> RetrievalEngine<'a> {
             None => return Ok(None),
         };
 
+        // Truncate body_text to ~50 lines for snippet
+        let snippet = sym.body_text.as_ref().map(|text| {
+            let lines: Vec<&str> = text.lines().take(50).collect();
+            lines.join("\n")
+        });
+
         Ok(Some(SearchResult {
             symbol_id: sym.id,
             name: sym.name.clone(),
@@ -351,6 +358,7 @@ impl<'a> RetrievalEngine<'a> {
             score: candidate.score,
             match_signals: candidate.signals.clone(),
             related_symbols: Vec::new(),
+            snippet,
         }))
     }
 
@@ -366,6 +374,7 @@ impl<'a> RetrievalEngine<'a> {
             score: 0.0,
             match_signals: vec![signal.to_string()],
             related_symbols: Vec::new(),
+            snippet: None,
         }
     }
 
@@ -445,6 +454,7 @@ mod tests {
             signature: Some(format!("def {name}()")),
             doc_comment: None,
             body_hash: 42,
+            body_text: None,
         }
     }
 
