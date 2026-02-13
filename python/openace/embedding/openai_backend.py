@@ -57,15 +57,19 @@ class OpenAIEmbedder:
                 "OpenAI API key required. Set OPENAI_API_KEY environment variable "
                 "or pass api_key parameter."
             )
-        kwargs = {"api_key": self._api_key, "max_retries": self._max_retries}
+        kwargs = {
+            "api_key": self._api_key,
+            "max_retries": self._max_retries,
+            "default_headers": {"User-Agent": "OpenACE/0.1.0"},
+        }
         if self._base_url:
             kwargs["base_url"] = self._base_url
         self._client = OpenAI(**kwargs)
         return self._client
 
     def _call_with_retry(self, client, kwargs: dict, max_attempts: int = 5) -> list:
-        """Call embeddings API with manual retry for rate limits."""
-        from openai import RateLimitError
+        """Call embeddings API with manual retry for rate limits and transient errors."""
+        from openai import APIStatusError, RateLimitError
 
         for attempt in range(max_attempts):
             try:
@@ -78,6 +82,16 @@ class OpenAIEmbedder:
                 print(f"  [embed] rate limited, waiting {wait}s "
                       f"(attempt {attempt + 1}/{max_attempts})")
                 time.sleep(wait)
+            except APIStatusError as exc:
+                if exc.status_code in (403, 500, 502, 503, 504):
+                    if attempt == max_attempts - 1:
+                        raise
+                    wait = min(5 * (2 ** attempt), 60)
+                    print(f"  [embed] HTTP {exc.status_code}, retrying in {wait}s "
+                          f"(attempt {attempt + 1}/{max_attempts})")
+                    time.sleep(wait)
+                else:
+                    raise
         return []
 
     def embed(self, texts: list[str]) -> "numpy.ndarray":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from typing import Optional
 
 import click
 
@@ -21,19 +22,64 @@ _AUTO_RERANKER = {
 }
 
 
-def _build_engine_kwargs(embedding: str, reranker: str, expansion: str = "none"):
+def _provider_options(f):
+    """Add shared provider configuration options to a Click command."""
+    options = [
+        click.option("--embedding-base-url", default=None,
+                     envvar="OPENACE_EMBEDDING_BASE_URL",
+                     help="Custom base URL for embedding API."),
+        click.option("--embedding-api-key", default=None,
+                     envvar="OPENACE_EMBEDDING_API_KEY",
+                     help="Custom API key for embedding provider."),
+        click.option("--embedding-dim", default=None, type=int,
+                     envvar="OPENACE_EMBEDDING_DIM",
+                     help="Embedding vector dimension override."),
+        click.option("--reranker-base-url", default=None,
+                     envvar="OPENACE_RERANKER_BASE_URL",
+                     help="Custom base URL for reranker API."),
+        click.option("--reranker-api-key", default=None,
+                     envvar="OPENACE_RERANKER_API_KEY",
+                     help="Custom API key for reranker provider."),
+    ]
+    for option in reversed(options):
+        f = option(f)
+    return f
+
+
+def _build_engine_kwargs(
+    embedding: str,
+    reranker: str,
+    expansion: str = "none",
+    embedding_base_url: Optional[str] = None,
+    embedding_api_key: Optional[str] = None,
+    embedding_dim: Optional[int] = None,
+    reranker_base_url: Optional[str] = None,
+    reranker_api_key: Optional[str] = None,
+):
     """Build Engine constructor kwargs from CLI options."""
     provider = None
     if embedding != "none":
         from openace.embedding.factory import create_provider
-        provider = create_provider(embedding)
+        embed_kwargs = {}
+        if embedding_api_key:
+            embed_kwargs["api_key"] = embedding_api_key
+        if embedding_base_url:
+            embed_kwargs["base_url"] = embedding_base_url
+        if embedding_dim:
+            embed_kwargs["dim"] = embedding_dim
+        provider = create_provider(embedding, **embed_kwargs)
 
     # Resolve reranker
     reranker_backend = reranker if reranker != "auto" else _AUTO_RERANKER.get(embedding, "none")
     reranker_obj = None
     if reranker_backend != "none":
         from openace.reranking.factory import create_reranker
-        reranker_obj = create_reranker(reranker_backend)
+        rerank_kwargs = {}
+        if reranker_api_key:
+            rerank_kwargs["api_key"] = reranker_api_key
+        if reranker_base_url:
+            rerank_kwargs["base_url"] = reranker_base_url
+        reranker_obj = create_reranker(reranker_backend, **rerank_kwargs)
 
     # Resolve query expander
     expander_obj = None
@@ -65,7 +111,10 @@ def main():
               help="Embedding provider to use.")
 @click.option("--reranker", type=click.Choice(RERANKER_CHOICES), default="auto",
               help="Reranker backend (default: auto, matches embedding).")
-def index(path: str, embedding: str, reranker: str):
+@_provider_options
+def index(path: str, embedding: str, reranker: str,
+          embedding_base_url, embedding_api_key, embedding_dim,
+          reranker_base_url, reranker_api_key):
     """Index a project directory."""
     from pathlib import Path
     from openace.engine import Engine
@@ -73,7 +122,14 @@ def index(path: str, embedding: str, reranker: str):
     project_path = str(Path(path).resolve())
     click.echo(f"Indexing {project_path}...")
 
-    engine_kwargs = _build_engine_kwargs(embedding, reranker)
+    engine_kwargs = _build_engine_kwargs(
+        embedding, reranker,
+        embedding_base_url=embedding_base_url,
+        embedding_api_key=embedding_api_key,
+        embedding_dim=embedding_dim,
+        reranker_base_url=reranker_base_url,
+        reranker_api_key=reranker_api_key,
+    )
     engine = Engine(project_path, **engine_kwargs)
     report = engine.index()
 
@@ -100,13 +156,24 @@ def index(path: str, embedding: str, reranker: str):
 @click.option("--limit", "-n", default=10, help="Max results.")
 @click.option("--language", "-l", default=None, help="Language filter.")
 @click.option("--file-path", "-f", default=None, help="File path prefix filter.")
-def search(query: str, path: str, embedding: str, reranker: str, expansion: str, limit: int, language: str, file_path: str):
+@_provider_options
+def search(query: str, path: str, embedding: str, reranker: str, expansion: str,
+           limit: int, language: str, file_path: str,
+           embedding_base_url, embedding_api_key, embedding_dim,
+           reranker_base_url, reranker_api_key):
     """Search for symbols in an indexed project."""
     from pathlib import Path
     from openace.engine import Engine
 
     project_path = str(Path(path).resolve())
-    engine_kwargs = _build_engine_kwargs(embedding, reranker, expansion)
+    engine_kwargs = _build_engine_kwargs(
+        embedding, reranker, expansion,
+        embedding_base_url=embedding_base_url,
+        embedding_api_key=embedding_api_key,
+        embedding_dim=embedding_dim,
+        reranker_base_url=reranker_base_url,
+        reranker_api_key=reranker_api_key,
+    )
     engine = Engine(project_path, **engine_kwargs)
     results = engine.search(query, limit=limit, language=language, file_path=file_path)
 
@@ -146,7 +213,10 @@ def search(query: str, path: str, embedding: str, reranker: str, expansion: str,
               envvar="OPENACE_RERANKER", help="Reranker backend (default: auto, matches embedding).")
 @click.option("--expansion", type=click.Choice(EXPANSION_CHOICES), default="none",
               envvar="OPENACE_EXPANSION", help="Query expansion backend.")
-def serve(path: str, embedding: str, reranker: str, expansion: str):
+@_provider_options
+def serve(path: str, embedding: str, reranker: str, expansion: str,
+          embedding_base_url, embedding_api_key, embedding_dim,
+          reranker_base_url, reranker_api_key):
     """Start MCP server on stdio."""
     import asyncio
     from pathlib import Path
@@ -164,7 +234,14 @@ def serve(path: str, embedding: str, reranker: str, expansion: str):
     click.echo(f"Starting OpenACE MCP server for {project_path}", err=True)
 
     try:
-        engine_kwargs = _build_engine_kwargs(embedding, reranker, expansion)
+        engine_kwargs = _build_engine_kwargs(
+            embedding, reranker, expansion,
+            embedding_base_url=embedding_base_url,
+            embedding_api_key=embedding_api_key,
+            embedding_dim=embedding_dim,
+            reranker_base_url=reranker_base_url,
+            reranker_api_key=reranker_api_key,
+        )
         engine = Engine(project_path, **engine_kwargs)
     except click.ClickException:
         raise

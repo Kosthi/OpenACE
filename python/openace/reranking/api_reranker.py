@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.request
 from dataclasses import replace
 from typing import Optional
@@ -32,12 +33,14 @@ class APIReranker:
         base_url: str,
         timeout: float = 30.0,
         max_results: int = 100,
+        max_retries: int = 3,
     ):
         self._model = model
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._max_results = max_results
+        self._max_retries = max_retries
 
     @staticmethod
     def _build_document_text(result: SearchResult) -> str:
@@ -74,15 +77,41 @@ class APIReranker:
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self._api_key}",
+                "User-Agent": "OpenACE/0.1.0",
             },
             method="POST",
         )
 
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:
-            raise RuntimeError(f"Rerank API request failed: {exc}") from exc
+        last_exc = None
+        for attempt in range(self._max_retries):
+            try:
+                with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                last_exc = None
+                break
+            except urllib.error.HTTPError as exc:
+                last_exc = exc
+                if exc.code in (403, 500, 502, 503, 504) and attempt < self._max_retries - 1:
+                    wait = min(3 * (2 ** attempt), 30)
+                    time.sleep(wait)
+                    # Rebuild request (urllib consumes the data buffer)
+                    req = urllib.request.Request(
+                        url,
+                        data=payload,
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self._api_key}",
+                            "User-Agent": "OpenACE/0.1.0",
+                        },
+                        method="POST",
+                    )
+                    continue
+                raise RuntimeError(f"Rerank API request failed: {exc}") from exc
+            except Exception as exc:
+                raise RuntimeError(f"Rerank API request failed: {exc}") from exc
+
+        if last_exc is not None:
+            raise RuntimeError(f"Rerank API request failed after {self._max_retries} retries: {last_exc}") from last_exc
 
         api_results = body.get("results", [])
 

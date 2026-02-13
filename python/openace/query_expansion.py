@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.request
 from typing import Optional, Protocol
 
@@ -56,6 +57,7 @@ class LLMQueryExpander:
         timeout: float = 15.0,
         max_tokens: int = 80,
         max_terms: int = 30,
+        max_retries: int = 3,
     ):
         self._model = model
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
@@ -63,6 +65,7 @@ class LLMQueryExpander:
         self._timeout = timeout
         self._max_tokens = max_tokens
         self._max_terms = max_terms
+        self._max_retries = max_retries
 
     def expand(self, query: str) -> str:
         """Expand query using LLM chat completion.
@@ -80,19 +83,33 @@ class LLMQueryExpander:
         }).encode("utf-8")
 
         url = f"{self._base_url}/chat/completions"
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self._api_key}",
-            },
-            method="POST",
-        )
 
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
+            body = None
+            for attempt in range(self._max_retries):
+                req = urllib.request.Request(
+                    url,
+                    data=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self._api_key}",
+                        "User-Agent": "OpenACE/0.1.0",
+                    },
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                        body = json.loads(resp.read().decode("utf-8"))
+                    break
+                except urllib.error.HTTPError as exc:
+                    if exc.code in (403, 500, 502, 503, 504) and attempt < self._max_retries - 1:
+                        wait = min(3 * (2 ** attempt), 15)
+                        time.sleep(wait)
+                        continue
+                    raise
+
+            if body is None:
+                return query
 
             content = body["choices"][0]["message"]["content"].strip()
             # Clean up: remove any thinking tags if present (some models wrap in <think>)
