@@ -15,6 +15,7 @@ fn bench_index_incremental(c: &mut Criterion) {
         repo_id: "bench-repo".to_string(),
         batch_size: 1000,
         embedding_dim: 384,
+        ..Default::default()
     };
 
     // Full index first
@@ -56,6 +57,7 @@ def new_function_{counter}() -> int:
                 "src/python/mod_0.py",
                 "bench-repo",
                 &mut storage,
+                None,
             );
         });
     });

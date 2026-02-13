@@ -5,7 +5,7 @@ mod types;
 mod watcher;
 
 use engine::EngineBinding;
-use types::{PyIndexReport, PyRelation, PySearchResult, PySymbol};
+use types::{PyChunkData, PyChunkInfo, PyIndexReport, PyRelation, PySearchResult, PySymbol};
 use watcher::WatcherBinding;
 
 #[pymodule(name = "_openace")]
@@ -14,6 +14,8 @@ fn openace_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySearchResult>()?;
     m.add_class::<PyIndexReport>()?;
     m.add_class::<PyRelation>()?;
+    m.add_class::<PyChunkInfo>()?;
+    m.add_class::<PyChunkData>()?;
     m.add_class::<EngineBinding>()?;
     m.add_class::<WatcherBinding>()?;
     Ok(())

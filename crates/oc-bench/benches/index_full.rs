@@ -14,6 +14,7 @@ fn bench_index_full(c: &mut Criterion) {
         repo_id: "bench-repo".to_string(),
         batch_size: 1000,
         embedding_dim: 384,
+        ..Default::default()
     };
 
     let mut group = c.benchmark_group("index_full");

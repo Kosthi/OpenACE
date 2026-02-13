@@ -9,6 +9,7 @@ pub use incremental::{
     delete_file as incremental_delete, diff_symbols, process_events, update_file,
     IncrementalReport, SymbolDiff,
 };
+pub use oc_parser::{ChunkConfig, chunk_file};
 pub use pipeline::index;
 pub use report::{IndexConfig, IndexReport, SkipReason};
 pub use scanner::scan_files;

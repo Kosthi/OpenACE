@@ -49,6 +49,7 @@ fn incremental_update_modified_file() {
         repo_id: "test-repo".to_string(),
         batch_size: 1000,
         embedding_dim: 384,
+        ..Default::default()
     };
 
     // Full index first
@@ -82,7 +83,7 @@ def new_handler(req):
     .unwrap();
 
     // Incremental update
-    let inc_report = update_file(tmp.path(), "src/main.py", "test-repo", &mut storage).unwrap();
+    let inc_report = update_file(tmp.path(), "src/main.py", "test-repo", &mut storage, None).unwrap();
     assert!(!inc_report.skipped_unchanged_hash);
 
     // Verify symbols changed for main.py
@@ -120,13 +121,14 @@ fn incremental_update_unchanged_file_skipped() {
         repo_id: "test-repo".to_string(),
         batch_size: 1000,
         embedding_dim: 384,
+        ..Default::default()
     };
     index(tmp.path(), &config).unwrap();
 
     let mut storage = StorageManager::open(tmp.path()).unwrap();
 
     // Update the same file without changing content
-    let report = update_file(tmp.path(), "src/main.py", "test-repo", &mut storage).unwrap();
+    let report = update_file(tmp.path(), "src/main.py", "test-repo", &mut storage, None).unwrap();
     assert!(
         report.skipped_unchanged_hash,
         "should skip when content hash matches"
@@ -145,6 +147,7 @@ fn incremental_delete_file_cleanup() {
         repo_id: "test-repo".to_string(),
         batch_size: 1000,
         embedding_dim: 384,
+        ..Default::default()
     };
     index(tmp.path(), &config).unwrap();
 
@@ -158,7 +161,7 @@ fn incremental_delete_file_cleanup() {
     assert!(storage.graph().get_file("src/utils.py").unwrap().is_some());
 
     // Delete the file
-    let report = incremental_delete("src/utils.py", &mut storage).unwrap();
+    let report = incremental_delete("src/utils.py", &mut storage, false).unwrap();
     assert!(report.removed > 0);
 
     // All symbols should be gone
@@ -192,6 +195,7 @@ fn incremental_process_events_batch() {
         repo_id: "test-repo".to_string(),
         batch_size: 1000,
         embedding_dim: 384,
+        ..Default::default()
     };
     index(tmp.path(), &config).unwrap();
 
@@ -212,7 +216,7 @@ def only_one_function():
     ];
 
     let mut storage = StorageManager::open(tmp.path()).unwrap();
-    let reports = process_events(tmp.path(), &events, "test-repo", &mut storage);
+    let reports = process_events(tmp.path(), &events, "test-repo", &mut storage, None);
 
     // Both should succeed
     for r in &reports {
@@ -238,6 +242,7 @@ fn convergence_incremental_vs_full_reindex() {
         repo_id: "test-repo".to_string(),
         batch_size: 1000,
         embedding_dim: 384,
+        ..Default::default()
     };
 
     // Full index
@@ -259,7 +264,7 @@ def helper():
 "#,
     )
     .unwrap();
-    update_file(tmp.path(), "src/main.py", "test-repo", &mut storage).unwrap();
+    update_file(tmp.path(), "src/main.py", "test-repo", &mut storage, None).unwrap();
 
     // Change 2: modify again
     fs::write(
@@ -273,7 +278,7 @@ def another_one():
 "#,
     )
     .unwrap();
-    update_file(tmp.path(), "src/main.py", "test-repo", &mut storage).unwrap();
+    update_file(tmp.path(), "src/main.py", "test-repo", &mut storage, None).unwrap();
 
     // Change 3: modify utils.py
     fs::write(
@@ -284,7 +289,7 @@ def new_util(val):
 "#,
     )
     .unwrap();
-    update_file(tmp.path(), "src/utils.py", "test-repo", &mut storage).unwrap();
+    update_file(tmp.path(), "src/utils.py", "test-repo", &mut storage, None).unwrap();
 
     storage.flush().unwrap();
 

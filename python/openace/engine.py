@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from openace.exceptions import IndexingError, OpenACEError, SearchError
-from openace.types import IndexReport, SearchResult, Symbol
+from openace.types import ChunkInfo, IndexReport, SearchResult, Symbol
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,13 @@ def _convert_symbol(py_sym) -> Symbol:
 
 def _convert_search_result(py_result) -> SearchResult:
     """Convert a PySearchResult from the Rust extension to a Python SearchResult."""
+    chunk_info = None
+    if hasattr(py_result, 'chunk_info') and py_result.chunk_info is not None:
+        ci = py_result.chunk_info
+        chunk_info = ChunkInfo(
+            context_path=ci.context_path,
+            chunk_score=ci.chunk_score,
+        )
     return SearchResult(
         symbol_id=py_result.symbol_id,
         name=py_result.name,
@@ -59,6 +66,7 @@ def _convert_search_result(py_result) -> SearchResult:
         match_signals=list(py_result.match_signals),
         related_symbols=[_convert_search_result(r) for r in py_result.related_symbols],
         snippet=py_result.snippet,
+        chunk_info=chunk_info,
     )
 
 
@@ -72,6 +80,7 @@ def _convert_index_report(py_report) -> IndexReport:
         total_symbols=py_report.total_symbols,
         total_relations=py_report.total_relations,
         duration_secs=py_report.duration_secs,
+        total_chunks=getattr(py_report, 'total_chunks', 0),
     )
 
 
@@ -97,6 +106,7 @@ class Engine:
         reranker: Optional[Reranker] = None,
         rerank_pool_size: int = 50,
         query_expander: Optional[QueryExpander] = None,
+        chunk_enabled: bool = False,
     ):
         """Initialize the engine.
 
@@ -108,6 +118,7 @@ class Engine:
             reranker: Optional reranker for two-stage search.
             rerank_pool_size: Number of candidates to retrieve before reranking.
             query_expander: Optional query expander for improved recall.
+            chunk_enabled: Enable AST chunk-level indexing and search.
         """
         from openace._openace import EngineBinding
 
@@ -117,6 +128,7 @@ class Engine:
         self._reranker = reranker
         self._rerank_pool_size = min(rerank_pool_size, 200)
         self._query_expander = query_expander
+        self._chunk_enabled = chunk_enabled
         if reranker is not None and rerank_pool_size > 200:
             logger.warning(
                 "rerank_pool_size=%d exceeds Rust upper bound of 200, capped to 200",
@@ -139,7 +151,7 @@ class Engine:
             IndexReport with statistics about the indexing run.
         """
         try:
-            py_report = self._core.index_full(self._project_root)
+            py_report = self._core.index_full(self._project_root, self._chunk_enabled)
             report = _convert_index_report(py_report)
         except Exception as e:
             raise IndexingError(f"indexing failed: {e}") from e
@@ -216,6 +228,7 @@ class Engine:
                 retrieval_limit,
                 language,
                 file_path,
+                self._chunk_enabled,
             )
             results = [_convert_search_result(r) for r in py_results]
 
@@ -327,6 +340,45 @@ class Engine:
             self._core.add_vectors(ids, vector_lists)
 
             total_embedded += len(symbols)
+            offset += batch_size
+
+        self._core.flush()
+        return total_embedded
+
+    def embed_all_chunks(self) -> int:
+        """Compute and store embeddings for all indexed chunks.
+
+        Iterates all chunks in batches, computes embeddings via the
+        configured provider, and stores vectors in the index.
+
+        Returns:
+            Number of chunks embedded.
+        """
+        if self._embedding_provider is None:
+            raise OpenACEError("no embedding provider configured")
+
+        batch_size = 100
+        offset = 0
+        total_embedded = 0
+
+        while True:
+            chunks = self._core.list_chunks_for_embedding(batch_size, offset)
+            if not chunks:
+                break
+
+            texts = []
+            ids = []
+            for chunk in chunks:
+                text = f"file: {chunk.file_path}\ncontext: {chunk.context_path}\n{chunk.content[:2048]}"
+                texts.append(text)
+                ids.append(chunk.id)
+
+            vectors = self._embedding_provider.embed(texts)
+            vector_lists = [v.tolist() for v in vectors]
+
+            self._core.add_vectors(ids, vector_lists)
+
+            total_embedded += len(chunks)
             offset += batch_size
 
         self._core.flush()

@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use oc_core::CodeSymbol;
-use oc_parser::{is_binary, parse_file, ParserRegistry};
+use oc_core::{CodeChunk, CodeSymbol};
+use oc_parser::{chunk_file, is_binary, parse_file_with_tree, ParserRegistry};
 use oc_storage::graph::FileMetadata;
 use oc_storage::manager::StorageManager;
 
@@ -20,6 +20,7 @@ enum FileOutcome {
         rel_path: String,
         symbols: Vec<CodeSymbol>,
         relations: Vec<oc_core::CodeRelation>,
+        chunks: Vec<CodeChunk>,
         content_hash: u64,
         file_size: u64,
         language: oc_core::Language,
@@ -62,6 +63,8 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
         })?;
 
     // 4. Parallel parse
+    let chunk_enabled = config.chunk_enabled;
+    let chunk_config = config.chunk_config.clone();
     let outcomes: Vec<FileOutcome> = scan_result
         .files
         .par_iter()
@@ -101,14 +104,30 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
                 None => return FileOutcome::Skipped(SkipReason::UnsupportedLanguage),
             };
 
-            // Parse
-            match parse_file(&config.repo_id, &rel_str, &content, file_size) {
-                Ok(output) => {
+            // Parse (with tree for optional chunking)
+            match parse_file_with_tree(&config.repo_id, &rel_str, &content, file_size) {
+                Ok(result) => {
                     let content_hash = xxhash_rust::xxh3::xxh3_64(&content);
+
+                    // Conditionally chunk
+                    let chunks = if chunk_enabled {
+                        chunk_file(
+                            &config.repo_id,
+                            &rel_str,
+                            &result.source,
+                            &result.tree,
+                            result.language,
+                            &chunk_config,
+                        )
+                    } else {
+                        Vec::new()
+                    };
+
                     FileOutcome::Parsed {
                         rel_path: rel_str,
-                        symbols: output.symbols,
-                        relations: output.relations,
+                        symbols: result.output.symbols,
+                        relations: result.output.relations,
+                        chunks,
                         content_hash,
                         file_size,
                         language: lang,
@@ -136,10 +155,12 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
     let mut files_failed = 0usize;
     let mut failed_details: Vec<(String, String)> = Vec::new();
     let mut total_symbols = 0usize;
+    let mut total_chunks = 0usize;
 
     let mut all_symbols: Vec<CodeSymbol> = Vec::new();
     let mut all_relations: Vec<oc_core::CodeRelation> = Vec::new();
     let mut all_body_map: HashMap<oc_core::SymbolId, String> = HashMap::new();
+    let mut all_chunks: Vec<CodeChunk> = Vec::new();
     let mut file_metas: Vec<FileMetadata> = Vec::new();
 
     let now = chrono_like_now();
@@ -150,6 +171,7 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
                 rel_path,
                 symbols,
                 relations,
+                chunks,
                 content_hash,
                 file_size,
                 language,
@@ -157,6 +179,7 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
             } => {
                 let sym_count = symbols.len();
                 total_symbols += sym_count;
+                total_chunks += chunks.len();
                 files_indexed += 1;
 
                 // Build body text map from source bytes and populate body_text field
@@ -185,6 +208,7 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
 
                 all_symbols.extend(symbols);
                 all_relations.extend(relations);
+                all_chunks.extend(chunks);
             }
             FileOutcome::Skipped(reason) => {
                 *files_skipped.entry(reason).or_insert(0) += 1;
@@ -255,6 +279,26 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
             })?;
     }
 
+    // Index chunks (if enabled)
+    if config.chunk_enabled && !all_chunks.is_empty() {
+        // Batch insert chunks into SQLite
+        storage
+            .graph_mut()
+            .insert_chunks(&all_chunks, config.batch_size)
+            .map_err(|e| IndexerError::PipelineFailed {
+                stage: "store_chunks".to_string(),
+                reason: e.to_string(),
+            })?;
+
+        // Index chunks into Tantivy fulltext
+        for chunk in &all_chunks {
+            if let Err(e) = storage.fulltext_mut().add_chunk_document(chunk) {
+                // Graceful degradation: log failure but don't block indexing
+                eprintln!("warning: chunk fulltext index failed: {e}");
+            }
+        }
+    }
+
     // Commit Tantivy and flush
     storage.flush().map_err(|e| IndexerError::PipelineFailed {
         stage: "flush".to_string(),
@@ -271,6 +315,7 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
         failed_details,
         total_symbols,
         total_relations: valid_relation_count,
+        total_chunks,
         duration,
     })
 }

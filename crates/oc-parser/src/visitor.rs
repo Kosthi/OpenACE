@@ -32,61 +32,58 @@ pub struct ParseOutput {
     pub relations: Vec<CodeRelation>,
 }
 
-/// 解析单个源代码文件，返回提取到的符号和关系。
+/// Output from parsing a file that also retains the tree-sitter AST tree.
 ///
-/// # 参数
-/// * `repo_id`   - 仓库标识符，用于生成全局唯一的 SymbolId。
-/// * `file_path` - 相对于项目根目录的文件路径（使用正斜杠分隔）。
-/// * `content`   - 文件的原始 UTF-8 字节内容。
-/// * `file_size` - 文件大小（字节），用于预读阶段的大小检查；实际内容长度也会被校验。
-pub fn parse_file(
-    repo_id: &str,   // 仓库 ID，例如 "github.com/user/repo"
-    file_path: &str, // 文件路径，例如 "src/main.rs"
-    content: &[u8],  // 文件的原始字节内容
-    file_size: u64,  // 文件系统报告的文件大小
-) -> Result<ParseOutput, ParserError> {
-    // 第一次检查：校验文件系统报告的 file_size 是否超出允许的最大值
+/// Used when both symbol extraction and chunking need the same parse tree,
+/// avoiding a redundant re-parse.
+pub struct ParseOutputWithTree {
+    /// Extracted symbols and relations.
+    pub output: ParseOutput,
+    /// The source code as a UTF-8 string.
+    pub source: String,
+    /// The tree-sitter AST.
+    pub tree: tree_sitter::Tree,
+    /// The detected language.
+    pub language: Language,
+}
+
+/// Parse a single source file, returning symbols, relations, and the tree-sitter AST.
+///
+/// This is the extended version of `parse_file()` that also returns the AST tree
+/// and source string, enabling downstream consumers (e.g., the chunker) to reuse
+/// the parse result without re-parsing.
+pub fn parse_file_with_tree(
+    repo_id: &str,
+    file_path: &str,
+    content: &[u8],
+    file_size: u64,
+) -> Result<ParseOutputWithTree, ParserError> {
     check_file_size(file_path, file_size)?;
-    // 第二次检查：校验实际读入内容的长度是否超出允许的最大值
-    // (两者可能不一致，例如文件在读取过程中被修改)
     check_file_size(file_path, content.len() as u64)?;
 
-    // 检测文件内容是否为二进制（通过检查是否包含 NULL 字节等特征）
     if is_binary(content) {
-        // 二进制文件无法作为源代码解析，返回编码错误
         return Err(ParserError::InvalidEncoding {
             path: file_path.to_string(),
         });
     }
 
-    // 尝试将原始字节转换为 UTF-8 字符串
-    // 如果转换失败（非法 UTF-8 序列），返回编码错误
     let source = std::str::from_utf8(content).map_err(|_| ParserError::InvalidEncoding {
         path: file_path.to_string(),
     })?;
 
-    // 从文件路径中提取扩展名（如 "rs"、"py"、"ts"）
-    // Path::new 创建路径对象 → .extension() 取扩展名 → .to_str() 转为字符串
-    // 如果没有扩展名，则默认为空字符串
     let ext = Path::new(file_path)
-        .extension() // 获取 OsStr 类型的扩展名，可能为 None
-        .and_then(|e| e.to_str()) // 转换为 &str，非 UTF-8 则为 None
-        .unwrap_or(""); // 无扩展名时使用空字符串
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
 
-    // 根据扩展名查询对应的编程语言枚举值
-    // 如果扩展名不被支持（未注册），返回 UnsupportedLanguage 错误
     let language = ParserRegistry::language_for_extension(ext).ok_or_else(|| {
         ParserError::UnsupportedLanguage {
             path: file_path.to_string(),
         }
     })?;
 
-    // 根据语言和扩展名获取对应的 tree-sitter grammar（语法定义）
     let grammar = ParserRegistry::grammar_for_extension(language, ext);
-    // 创建一个新的 tree-sitter 解析器实例
     let mut parser = tree_sitter::Parser::new();
-    // 为解析器设置目标语言的 grammar
-    // 如果语言版本不兼容等原因导致设置失败，返回 ParseFailed 错误
     parser
         .set_language(&grammar)
         .map_err(|e| ParserError::ParseFailed {
@@ -94,9 +91,6 @@ pub fn parse_file(
             reason: format!("failed to set language: {e}"),
         })?;
 
-    // 使用 tree-sitter 解析源代码，生成语法树（AST）
-    // 第二个参数 None 表示不使用增量解析（没有旧的语法树可复用）
-    // 如果解析失败（返回 None），则报告 ParseFailed 错误
     let tree = parser
         .parse(source, None)
         .ok_or_else(|| ParserError::ParseFailed {
@@ -104,27 +98,40 @@ pub fn parse_file(
             reason: "tree-sitter returned no tree".to_string(),
         })?;
 
-    // 构造 VisitorContext，将解析所需的上下文信息打包传递给各语言的 visitor
     let ctx = VisitorContext {
-        repo_id,   // 仓库标识符
-        file_path, // 文件路径
-        source,    // 源代码文本
-        language,  // 编程语言类型
+        repo_id,
+        file_path,
+        source,
+        language,
     };
 
-    // 根据检测到的编程语言，分发到对应的语言 visitor 模块进行符号和关系提取
-    match language {
-        // Python 文件 → 交给 python 模块处理
+    let output = match language {
         Language::Python => python::extract(&ctx, &tree),
-        // TypeScript 或 JavaScript 文件 → 交给 typescript 模块处理（二者共用同一个 visitor）
         Language::TypeScript | Language::JavaScript => typescript::extract(&ctx, &tree),
-        // Rust 文件 → 交给 rust_lang 模块处理
         Language::Rust => rust_lang::extract(&ctx, &tree),
-        // Go 文件 → 交给 go_lang 模块处理
         Language::Go => go_lang::extract(&ctx, &tree),
-        // Java 文件 → 交给 java 模块处理
         Language::Java => java::extract(&ctx, &tree),
-    }
+    }?;
+
+    Ok(ParseOutputWithTree {
+        output,
+        source: source.to_string(),
+        tree,
+        language,
+    })
+}
+
+/// Parse a single source file, returning extracted symbols and relations.
+///
+/// This is the standard entry point. If you also need the tree-sitter AST
+/// (e.g., for chunking), use `parse_file_with_tree()` instead.
+pub fn parse_file(
+    repo_id: &str,
+    file_path: &str,
+    content: &[u8],
+    file_size: u64,
+) -> Result<ParseOutput, ParserError> {
+    parse_file_with_tree(repo_id, file_path, content, file_size).map(|r| r.output)
 }
 
 /// 各语言 visitor 共享的上下文结构体。

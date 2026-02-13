@@ -1,13 +1,13 @@
 use std::path::Path;
 
-use oc_core::{CodeRelation, CodeSymbol, Language, RelationKind, SymbolId, SymbolKind};
+use oc_core::{ChunkId, CodeChunk, CodeRelation, CodeSymbol, Language, RelationKind, SymbolId, SymbolKind};
 use rusqlite::{params, Connection};
 use xxhash_rust::xxh3::xxh3_128;
 
 use crate::error::StorageError;
 
 /// Current schema version. Increment when schema changes.
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 /// Direction for graph traversal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +91,7 @@ impl GraphStore {
     /// persists. The repositories table is preserved.
     pub fn clear(&mut self) -> Result<(), StorageError> {
         self.conn.execute_batch(
-            "DELETE FROM relations; DELETE FROM symbols; DELETE FROM files;",
+            "DELETE FROM relations; DELETE FROM symbols; DELETE FROM files; DELETE FROM chunks;",
         )?;
         Ok(())
     }
@@ -424,6 +424,100 @@ impl GraphStore {
         Ok(results)
     }
 
+    // -- Chunk CRUD --
+
+    /// Insert chunks in batched transactions.
+    pub fn insert_chunks(
+        &mut self,
+        chunks: &[CodeChunk],
+        batch_size: usize,
+    ) -> Result<(), StorageError> {
+        let now = now_rfc3339();
+        for batch in chunks.chunks(batch_size) {
+            let tx = self.conn.transaction()?;
+            {
+                let mut stmt = tx.prepare_cached(
+                    "INSERT OR REPLACE INTO chunks \
+                     (id, language, file_path, line_start, line_end, \
+                      byte_start, byte_end, chunk_index, total_chunks, \
+                      context_path, content, content_hash, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                )?;
+                for chunk in batch {
+                    stmt.execute(params![
+                        chunk.id.as_bytes().as_slice(),
+                        chunk.language.ordinal() as i64,
+                        chunk.file_path.to_string_lossy().as_ref(),
+                        chunk.line_range.start as i64,
+                        chunk.line_range.end as i64,
+                        chunk.byte_range.start as i64,
+                        chunk.byte_range.end as i64,
+                        chunk.chunk_index as i64,
+                        chunk.total_chunks as i64,
+                        chunk.context_path,
+                        chunk.content,
+                        chunk.content_hash as i64,
+                        &now,
+                        &now,
+                    ])?;
+                }
+            }
+            tx.commit()?;
+        }
+        Ok(())
+    }
+
+    /// Query all chunks for a given file path.
+    pub fn get_chunks_by_file(&self, file_path: &str) -> Result<Vec<CodeChunk>, StorageError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, language, file_path, line_start, line_end, \
+             byte_start, byte_end, chunk_index, total_chunks, \
+             context_path, content, content_hash \
+             FROM chunks WHERE file_path = ?1 ORDER BY chunk_index",
+        )?;
+        let mut rows = stmt.query(params![file_path])?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next()? {
+            results.push(row_to_chunk(row)?);
+        }
+        Ok(results)
+    }
+
+    /// Delete all chunks for a given file path.
+    pub fn delete_chunks_by_file(&mut self, file_path: &str) -> Result<usize, StorageError> {
+        let affected = self.conn.execute(
+            "DELETE FROM chunks WHERE file_path = ?1",
+            params![file_path],
+        )?;
+        Ok(affected)
+    }
+
+    /// Count total number of chunks in the store.
+    pub fn count_chunks(&self) -> Result<usize, StorageError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chunks",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// List chunks with pagination, ordered by ID for deterministic iteration.
+    pub fn list_chunks(&self, limit: usize, offset: usize) -> Result<Vec<CodeChunk>, StorageError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, language, file_path, line_start, line_end, \
+             byte_start, byte_end, chunk_index, total_chunks, \
+             context_path, content, content_hash \
+             FROM chunks ORDER BY id LIMIT ?1 OFFSET ?2",
+        )?;
+        let mut rows = stmt.query(params![limit as i64, offset as i64])?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next()? {
+            results.push(row_to_chunk(row)?);
+        }
+        Ok(results)
+    }
+
     // -- File metadata --
 
     pub fn upsert_file(&mut self, meta: &FileMetadata) -> Result<(), StorageError> {
@@ -591,7 +685,26 @@ fn create_schema(conn: &Connection) -> Result<(), StorageError> {
             path        TEXT NOT NULL,
             name        TEXT NOT NULL,
             created_at  TEXT NOT NULL
-        );",
+        );
+
+        CREATE TABLE IF NOT EXISTS chunks (
+            id           BLOB PRIMARY KEY,
+            language     INTEGER NOT NULL,
+            file_path    TEXT NOT NULL,
+            line_start   INTEGER NOT NULL,
+            line_end     INTEGER NOT NULL,
+            byte_start   INTEGER NOT NULL,
+            byte_end     INTEGER NOT NULL,
+            chunk_index  INTEGER NOT NULL,
+            total_chunks INTEGER NOT NULL,
+            context_path TEXT NOT NULL,
+            content      TEXT NOT NULL,
+            content_hash INTEGER NOT NULL,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path);",
     )?;
     Ok(())
 }
@@ -753,6 +866,46 @@ fn row_to_file_metadata(row: &rusqlite::Row<'_>) -> Result<FileMetadata, Storage
         symbol_count: sym_count as u32,
         last_indexed: row.get(5)?,
         last_modified: row.get(6)?,
+    })
+}
+
+fn row_to_chunk(row: &rusqlite::Row<'_>) -> Result<CodeChunk, StorageError> {
+    let id_blob: Vec<u8> = row.get(0)?;
+    if id_blob.len() != 16 {
+        return Err(StorageError::TransactionFailed {
+            reason: format!("invalid chunk id length: {}", id_blob.len()),
+        });
+    }
+    let mut id_bytes = [0u8; 16];
+    id_bytes.copy_from_slice(&id_blob);
+
+    let lang_ord: i64 = row.get(1)?;
+    let file_path_str: String = row.get(2)?;
+    let line_start: i64 = row.get(3)?;
+    let line_end: i64 = row.get(4)?;
+    let byte_start: i64 = row.get(5)?;
+    let byte_end: i64 = row.get(6)?;
+    let chunk_index: i64 = row.get(7)?;
+    let total_chunks: i64 = row.get(8)?;
+    let content_hash: i64 = row.get(11)?;
+
+    let language = Language::from_ordinal(lang_ord as u8).ok_or_else(|| {
+        StorageError::TransactionFailed {
+            reason: format!("invalid language ordinal: {}", lang_ord),
+        }
+    })?;
+
+    Ok(CodeChunk {
+        id: ChunkId::from_bytes(id_bytes),
+        language,
+        file_path: file_path_str.into(),
+        byte_range: (byte_start as usize)..(byte_end as usize),
+        line_range: (line_start as u32)..(line_end as u32),
+        chunk_index: chunk_index as u32,
+        total_chunks: total_chunks as u32,
+        context_path: row.get(9)?,
+        content: row.get(10)?,
+        content_hash: content_hash as u64,
     })
 }
 
@@ -1091,5 +1244,103 @@ mod tests {
         let result = store.list_symbols(10, 0).unwrap();
         assert!(result.is_empty());
         assert_eq!(store.count_symbols().unwrap(), 0);
+    }
+
+    // -- Chunk CRUD tests --
+
+    fn make_chunk(file: &str, byte_start: usize, byte_end: usize, index: u32, total: u32) -> CodeChunk {
+        CodeChunk {
+            id: ChunkId::generate("test-repo", file, byte_start, byte_end),
+            language: Language::Python,
+            file_path: PathBuf::from(file),
+            byte_range: byte_start..byte_end,
+            line_range: 0..10,
+            chunk_index: index,
+            total_chunks: total,
+            context_path: "MyClass.method".to_string(),
+            content: format!("chunk content {}..{}", byte_start, byte_end),
+            content_hash: 12345,
+        }
+    }
+
+    #[test]
+    fn chunk_round_trip() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let chunk = make_chunk("src/main.py", 0, 100, 0, 2);
+        store.insert_chunks(&[chunk.clone()], 1000).unwrap();
+
+        let loaded = store.get_chunks_by_file("src/main.py").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, chunk.id);
+        assert_eq!(loaded[0].language, chunk.language);
+        assert_eq!(loaded[0].file_path, chunk.file_path);
+        assert_eq!(loaded[0].byte_range, chunk.byte_range);
+        assert_eq!(loaded[0].line_range, chunk.line_range);
+        assert_eq!(loaded[0].chunk_index, chunk.chunk_index);
+        assert_eq!(loaded[0].total_chunks, chunk.total_chunks);
+        assert_eq!(loaded[0].context_path, chunk.context_path);
+        assert_eq!(loaded[0].content, chunk.content);
+        assert_eq!(loaded[0].content_hash, chunk.content_hash);
+    }
+
+    #[test]
+    fn chunk_query_by_file() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let c1 = make_chunk("src/a.py", 0, 50, 0, 2);
+        let c2 = make_chunk("src/a.py", 50, 100, 1, 2);
+        let c3 = make_chunk("src/b.py", 0, 80, 0, 1);
+        store.insert_chunks(&[c1, c2, c3], 1000).unwrap();
+
+        let a_chunks = store.get_chunks_by_file("src/a.py").unwrap();
+        assert_eq!(a_chunks.len(), 2);
+        // Should be ordered by chunk_index
+        assert_eq!(a_chunks[0].chunk_index, 0);
+        assert_eq!(a_chunks[1].chunk_index, 1);
+
+        let b_chunks = store.get_chunks_by_file("src/b.py").unwrap();
+        assert_eq!(b_chunks.len(), 1);
+    }
+
+    #[test]
+    fn chunk_delete_by_file() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let c1 = make_chunk("src/a.py", 0, 50, 0, 1);
+        let c2 = make_chunk("src/b.py", 0, 80, 0, 1);
+        store.insert_chunks(&[c1, c2], 1000).unwrap();
+
+        let deleted = store.delete_chunks_by_file("src/a.py").unwrap();
+        assert_eq!(deleted, 1);
+
+        assert!(store.get_chunks_by_file("src/a.py").unwrap().is_empty());
+        assert_eq!(store.get_chunks_by_file("src/b.py").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn chunk_count_and_list() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        assert_eq!(store.count_chunks().unwrap(), 0);
+
+        let chunks: Vec<CodeChunk> = (0..5)
+            .map(|i| make_chunk("src/a.py", i * 100, (i + 1) * 100, i as u32, 5))
+            .collect();
+        store.insert_chunks(&chunks, 1000).unwrap();
+        assert_eq!(store.count_chunks().unwrap(), 5);
+
+        let page1 = store.list_chunks(3, 0).unwrap();
+        assert_eq!(page1.len(), 3);
+
+        let page2 = store.list_chunks(3, 3).unwrap();
+        assert_eq!(page2.len(), 2);
+    }
+
+    #[test]
+    fn clear_deletes_chunks() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let c = make_chunk("src/a.py", 0, 50, 0, 1);
+        store.insert_chunks(&[c], 1000).unwrap();
+        assert_eq!(store.count_chunks().unwrap(), 1);
+
+        store.clear().unwrap();
+        assert_eq!(store.count_chunks().unwrap(), 0);
     }
 }

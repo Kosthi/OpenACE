@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use oc_parser::ChunkConfig;
+
 /// Configuration for the indexing pipeline.
 pub struct IndexConfig {
     /// Repository identifier for SymbolId generation.
@@ -9,6 +11,10 @@ pub struct IndexConfig {
     pub batch_size: usize,
     /// Embedding vector dimension (default: 384).
     pub embedding_dim: usize,
+    /// Enable AST chunk-level indexing (default: false).
+    pub chunk_enabled: bool,
+    /// Configuration for the AST chunker (used when `chunk_enabled` is true).
+    pub chunk_config: ChunkConfig,
 }
 
 impl Default for IndexConfig {
@@ -17,6 +23,8 @@ impl Default for IndexConfig {
             repo_id: String::new(),
             batch_size: 1000,
             embedding_dim: 384,
+            chunk_enabled: false,
+            chunk_config: ChunkConfig::default(),
         }
     }
 }
@@ -40,6 +48,7 @@ pub struct IndexReport {
     pub failed_details: Vec<(String, String)>,
     pub total_symbols: usize,
     pub total_relations: usize,
+    pub total_chunks: usize,
     pub duration: Duration,
 }
 

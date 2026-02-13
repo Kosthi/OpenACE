@@ -13,6 +13,7 @@ fn e2e_full_index_search_all_signals() {
         repo_id: "e2e-test".to_string(),
         batch_size: 1000,
         embedding_dim: 384,
+        ..Default::default()
     };
 
     let report = index(tmp.path(), &config).unwrap();

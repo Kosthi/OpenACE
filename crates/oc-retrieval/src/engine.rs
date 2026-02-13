@@ -22,6 +22,10 @@ pub struct SearchQuery {
     pub exact_match_pool_size: usize,
     pub query_vector: Option<Vec<f32>>,
     pub vector_pool_size: usize,
+    /// Enable chunk-level BM25 search as an additional signal.
+    pub enable_chunk_search: bool,
+    /// Pool size for chunk BM25 retrieval.
+    pub chunk_bm25_pool_size: usize,
 }
 
 impl SearchQuery {
@@ -37,6 +41,8 @@ impl SearchQuery {
             exact_match_pool_size: 50,
             query_vector: None,
             vector_pool_size: 50,
+            enable_chunk_search: false,
+            chunk_bm25_pool_size: 100,
         }
     }
 
@@ -62,6 +68,15 @@ pub struct SearchResult {
     pub match_signals: Vec<String>,
     pub related_symbols: Vec<SearchResult>,
     pub snippet: Option<String>,
+    /// If this result was boosted by chunk BM25, contains the context path.
+    pub chunk_info: Option<ChunkInfo>,
+}
+
+/// Information about a chunk that boosted a search result.
+#[derive(Debug, Clone)]
+pub struct ChunkInfo {
+    pub context_path: String,
+    pub chunk_score: f32,
 }
 
 /// Accumulator for per-symbol RRF scoring.
@@ -95,10 +110,15 @@ impl<'a> RetrievalEngine<'a> {
         // Signal 3: Exact symbol name match
         self.collect_exact_match(query, &mut candidates);
 
+        // Signal 4: Chunk BM25 (file-level boost from chunk hits)
+        if query.enable_chunk_search {
+            self.collect_bm25_chunks(query, &mut candidates);
+        }
+
         // Collect seed IDs (direct signal hits) before graph expansion
         let direct_hit_ids: HashSet<SymbolId> = candidates.keys().copied().collect();
 
-        // Signal 3: Graph expansion (applied to hits from signals 1+2)
+        // Signal 5: Graph expansion (applied to hits from direct signals)
         if query.enable_graph_expansion && !candidates.is_empty() {
             self.expand_graph(query, &mut candidates);
         }
@@ -256,6 +276,74 @@ impl<'a> RetrievalEngine<'a> {
         }
     }
 
+    /// Chunk BM25 signal: query Tantivy for chunk documents, map chunk hits
+    /// to file-level candidates. Each chunk hit boosts the best symbol in its file.
+    fn collect_bm25_chunks(
+        &self,
+        query: &SearchQuery,
+        candidates: &mut HashMap<SymbolId, ScoredCandidate>,
+    ) {
+        let hits = self.storage.fulltext().search_bm25_chunks(
+            &query.text,
+            query.chunk_bm25_pool_size,
+            query.file_path_filter.as_deref(),
+            query.language_filter,
+        );
+
+        let hits = match hits {
+            Ok(h) => h,
+            Err(_) => return, // graceful degradation
+        };
+
+        if hits.is_empty() {
+            return;
+        }
+
+        // Map chunk hits to file paths, tracking the best chunk per file
+        let mut file_chunks: HashMap<String, (usize, f32)> = HashMap::new(); // file -> (rank, score)
+        for (rank, hit) in hits.iter().enumerate() {
+            file_chunks
+                .entry(hit.file_path.clone())
+                .or_insert((rank, hit.score));
+        }
+
+        // For each file with chunk hits, find the best symbol in that file
+        // and apply the chunk_bm25 RRF boost
+        for (file_path, (rank, _score)) in &file_chunks {
+            let symbols = match self.storage.graph().get_symbols_by_file(file_path) {
+                Ok(syms) => syms,
+                Err(_) => continue,
+            };
+
+            if symbols.is_empty() {
+                continue;
+            }
+
+            // Pick the best symbol: prefer classes/functions, use the first one
+            let best = symbols
+                .iter()
+                .min_by_key(|s| match s.kind {
+                    SymbolKind::Class | SymbolKind::Struct | SymbolKind::Interface | SymbolKind::Trait => 0,
+                    SymbolKind::Function | SymbolKind::Method => 1,
+                    _ => 2,
+                })
+                .unwrap();
+
+            let rrf_score = 1.0 / (*rank as f64 + 1.0 + RRF_K);
+            let entry = candidates
+                .entry(best.id)
+                .or_insert_with(|| ScoredCandidate {
+                    symbol_id: best.id,
+                    score: 0.0,
+                    signals: Vec::new(),
+                });
+            entry.score += rrf_score;
+            if !entry.signals.contains(&"chunk_bm25".to_string()) {
+                entry.signals.push("chunk_bm25".to_string());
+            }
+        }
+    }
+
     /// Graph expansion: for each current hit, traverse k-hop neighbors and add
     /// them as candidates with the "graph" signal.
     fn expand_graph(
@@ -359,6 +447,7 @@ impl<'a> RetrievalEngine<'a> {
             match_signals: candidate.signals.clone(),
             related_symbols: Vec::new(),
             snippet,
+            chunk_info: None,
         }))
     }
 
@@ -375,6 +464,7 @@ impl<'a> RetrievalEngine<'a> {
             match_signals: vec![signal.to_string()],
             related_symbols: Vec::new(),
             snippet: None,
+            chunk_info: None,
         }
     }
 
@@ -610,6 +700,8 @@ mod tests {
         assert_eq!(q.exact_match_pool_size, 50);
         assert!(q.query_vector.is_none());
         assert_eq!(q.vector_pool_size, 50);
+        assert!(!q.enable_chunk_search);
+        assert_eq!(q.chunk_bm25_pool_size, 100);
     }
 
     #[test]

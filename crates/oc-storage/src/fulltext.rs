@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use oc_core::{CodeSymbol, Language, SymbolId};
+use oc_core::{ChunkId, CodeChunk, CodeSymbol, Language, SymbolId};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::*;
@@ -137,6 +137,14 @@ pub struct FullTextHit {
     pub score: f32,
 }
 
+/// A single BM25 chunk search hit.
+#[derive(Debug, Clone)]
+pub struct FullTextChunkHit {
+    pub chunk_id: ChunkId,
+    pub file_path: String,
+    pub score: f32,
+}
+
 /// Full-text search index backed by Tantivy.
 ///
 /// Uses a code-aware tokenizer that splits camelCase, PascalCase, snake_case,
@@ -154,11 +162,12 @@ pub struct FullTextStore {
     f_content: Field,
     f_file_path: Field,
     f_language: Field,
+    f_doc_type: Field,
     pending_count: usize,
     last_commit: Instant,
 }
 
-fn build_schema() -> (Schema, Field, Field, Field, Field, Field, Field) {
+fn build_schema() -> (Schema, Field, Field, Field, Field, Field, Field, Field) {
     let mut builder = Schema::builder();
 
     let symbol_id = builder.add_text_field("symbol_id", STRING | STORED);
@@ -182,9 +191,10 @@ fn build_schema() -> (Schema, Field, Field, Field, Field, Field, Field) {
     let content = builder.add_text_field("content", code_text_unstored);
     let file_path = builder.add_text_field("file_path", STRING | STORED);
     let language = builder.add_text_field("language", STRING | STORED);
+    let doc_type = builder.add_text_field("doc_type", STRING);
 
     let schema = builder.build();
-    (schema, symbol_id, name, qualified_name, content, file_path, language)
+    (schema, symbol_id, name, qualified_name, content, file_path, language, doc_type)
 }
 
 fn register_code_tokenizer(index: &Index) {
@@ -199,7 +209,7 @@ impl FullTextStore {
     pub fn open(path: &Path) -> Result<Self, StorageError> {
         std::fs::create_dir_all(path)?;
 
-        let (schema, f_symbol_id, f_name, f_qualified_name, f_content, f_file_path, f_language) =
+        let (schema, f_symbol_id, f_name, f_qualified_name, f_content, f_file_path, f_language, f_doc_type) =
             build_schema();
 
         let index = Index::open_in_dir(path)
@@ -224,6 +234,7 @@ impl FullTextStore {
             f_content,
             f_file_path,
             f_language,
+            f_doc_type,
             pending_count: 0,
             last_commit: Instant::now(),
         })
@@ -231,7 +242,7 @@ impl FullTextStore {
 
     /// Create an in-memory full-text index (for testing).
     pub fn create_in_ram() -> Result<Self, StorageError> {
-        let (schema, f_symbol_id, f_name, f_qualified_name, f_content, f_file_path, f_language) =
+        let (schema, f_symbol_id, f_name, f_qualified_name, f_content, f_file_path, f_language, f_doc_type) =
             build_schema();
 
         let index = Index::create_in_ram(schema);
@@ -254,6 +265,7 @@ impl FullTextStore {
             f_content,
             f_file_path,
             f_language,
+            f_doc_type,
             pending_count: 0,
             last_commit: Instant::now(),
         })
@@ -302,6 +314,7 @@ impl FullTextStore {
             self.f_content => content.as_str(),
             self.f_file_path => symbol.file_path.to_string_lossy().as_ref(),
             self.f_language => symbol.language.name(),
+            self.f_doc_type => "symbol",
         ))?;
 
         self.pending_count += 1;
@@ -343,35 +356,41 @@ impl FullTextStore {
                     reason: format!("query parse error: {e}"),
                 })?;
 
-        let final_query: Box<dyn tantivy::query::Query> =
-            if file_path_filter.is_some() || language_filter.is_some() {
-                let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> =
-                    vec![(Occur::Must, text_query)];
+        let final_query: Box<dyn tantivy::query::Query> = {
+            let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> =
+                vec![(Occur::Must, text_query)];
 
-                if let Some(fp) = file_path_filter {
-                    clauses.push((
-                        Occur::Must,
-                        Box::new(TermQuery::new(
-                            Term::from_field_text(self.f_file_path, fp),
-                            IndexRecordOption::Basic,
-                        )),
-                    ));
-                }
+            // Always filter to symbol documents
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.f_doc_type, "symbol"),
+                    IndexRecordOption::Basic,
+                )),
+            ));
 
-                if let Some(lang) = language_filter {
-                    clauses.push((
-                        Occur::Must,
-                        Box::new(TermQuery::new(
-                            Term::from_field_text(self.f_language, lang.name()),
-                            IndexRecordOption::Basic,
-                        )),
-                    ));
-                }
+            if let Some(fp) = file_path_filter {
+                clauses.push((
+                    Occur::Must,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(self.f_file_path, fp),
+                        IndexRecordOption::Basic,
+                    )),
+                ));
+            }
 
-                Box::new(BooleanQuery::new(clauses))
-            } else {
-                text_query
-            };
+            if let Some(lang) = language_filter {
+                clauses.push((
+                    Occur::Must,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(self.f_language, lang.name()),
+                        IndexRecordOption::Basic,
+                    )),
+                ));
+            }
+
+            Box::new(BooleanQuery::new(clauses))
+        };
 
         let searcher = self.reader.searcher();
         let top_docs = searcher.search(&*final_query, &TopDocs::with_limit(limit))?;
@@ -383,6 +402,131 @@ impl FullTextStore {
                 if let Some(id) = parse_symbol_id_hex(hex) {
                     hits.push(FullTextHit {
                         symbol_id: id,
+                        score,
+                    });
+                }
+            }
+        }
+
+        Ok(hits)
+    }
+
+    /// Add a chunk document to the index.
+    ///
+    /// The chunk ID is stored with a `c:` prefix to avoid collision with symbol IDs.
+    pub fn add_chunk_document(&mut self, chunk: &CodeChunk) -> Result<(), StorageError> {
+        let id_hex = format!("c:{}", chunk.id);
+        let content_text = oc_core::truncate_utf8_bytes(&chunk.content, CONTENT_MAX_BYTES);
+
+        // Tokenize file path segments for BM25 matching
+        let path_tokens: String = chunk
+            .file_path
+            .to_string_lossy()
+            .split(|c: char| c == '/' || c == '\\' || c == '.' || c == '_' || c == '-')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let content = format!("{} {} {}", path_tokens, chunk.context_path, content_text);
+
+        self.writer.add_document(doc!(
+            self.f_symbol_id => id_hex,
+            self.f_name => chunk.context_path.as_str(),
+            self.f_qualified_name => chunk.context_path.as_str(),
+            self.f_content => content.as_str(),
+            self.f_file_path => chunk.file_path.to_string_lossy().as_ref(),
+            self.f_language => chunk.language.name(),
+            self.f_doc_type => "chunk",
+        ))?;
+
+        self.pending_count += 1;
+        self.maybe_commit()?;
+        Ok(())
+    }
+
+    /// Delete a chunk document by its chunk ID.
+    pub fn delete_chunk_document(&mut self, chunk_id: ChunkId) -> Result<(), StorageError> {
+        let hex = format!("c:{}", chunk_id);
+        self.writer
+            .delete_term(Term::from_field_text(self.f_symbol_id, &hex));
+        self.pending_count += 1;
+        self.maybe_commit()?;
+        Ok(())
+    }
+
+    /// Search for chunks using BM25 ranking.
+    ///
+    /// Same query logic as `search_bm25()` but filters on `doc_type = "chunk"`.
+    pub fn search_bm25_chunks(
+        &self,
+        query: &str,
+        limit: usize,
+        file_path_filter: Option<&str>,
+        language_filter: Option<Language>,
+    ) -> Result<Vec<FullTextChunkHit>, StorageError> {
+        let query_parser = QueryParser::for_index(
+            &self.index,
+            vec![self.f_name, self.f_qualified_name, self.f_content],
+        );
+
+        let text_query =
+            query_parser
+                .parse_query(query)
+                .map_err(|e| StorageError::FullTextIndexUnavailable {
+                    reason: format!("query parse error: {e}"),
+                })?;
+
+        let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> =
+            vec![(Occur::Must, text_query)];
+
+        // Filter to chunk documents only
+        clauses.push((
+            Occur::Must,
+            Box::new(TermQuery::new(
+                Term::from_field_text(self.f_doc_type, "chunk"),
+                IndexRecordOption::Basic,
+            )),
+        ));
+
+        if let Some(fp) = file_path_filter {
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.f_file_path, fp),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
+
+        if let Some(lang) = language_filter {
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.f_language, lang.name()),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
+
+        let final_query = BooleanQuery::new(clauses);
+        let searcher = self.reader.searcher();
+        let top_docs = searcher.search(&final_query, &TopDocs::with_limit(limit))?;
+
+        let mut hits = Vec::with_capacity(top_docs.len());
+        for (score, doc_address) in top_docs {
+            let retrieved: TantivyDocument = searcher.doc(doc_address)?;
+            if let Some(OwnedValue::Str(hex)) = retrieved.get_first(self.f_symbol_id) {
+                if let Some(chunk_id) = parse_chunk_id_hex(hex) {
+                    let file_path = retrieved
+                        .get_first(self.f_file_path)
+                        .and_then(|v| match v {
+                            OwnedValue::Str(s) => Some(s.to_string()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    hits.push(FullTextChunkHit {
+                        chunk_id,
+                        file_path,
                         score,
                     });
                 }
@@ -427,6 +571,12 @@ impl Drop for FullTextStore {
 /// Parse a 32-hex-char SymbolId.
 fn parse_symbol_id_hex(hex: &str) -> Option<SymbolId> {
     u128::from_str_radix(hex, 16).ok().map(SymbolId)
+}
+
+/// Parse a chunk ID hex string with `c:` prefix.
+fn parse_chunk_id_hex(hex: &str) -> Option<ChunkId> {
+    let stripped = hex.strip_prefix("c:")?;
+    u128::from_str_radix(stripped, 16).ok().map(ChunkId)
 }
 
 #[cfg(test)]
@@ -754,5 +904,93 @@ mod tests {
         // Search by "formula" matches both path token and function name
         let hits = store.search_bm25("formula", 10, None, None).unwrap();
         assert_eq!(hits.len(), 1);
+    }
+
+    // --- Chunk document tests ---
+
+    fn make_chunk(id_val: u128, file: &str, context: &str, content: &str) -> CodeChunk {
+        CodeChunk {
+            id: ChunkId(id_val),
+            language: Language::Python,
+            file_path: PathBuf::from(file),
+            byte_range: 0..100,
+            line_range: 0..5,
+            chunk_index: 0,
+            total_chunks: 1,
+            context_path: context.to_string(),
+            content: content.to_string(),
+            content_hash: 0,
+        }
+    }
+
+    #[test]
+    fn chunk_add_and_search() {
+        let mut store = FullTextStore::create_in_ram().unwrap();
+        let chunk = make_chunk(100, "src/parser.py", "MyParser.parse", "def parse(self, data): return data.strip()");
+        store.add_chunk_document(&chunk).unwrap();
+        store.commit().unwrap();
+
+        let hits = store.search_bm25_chunks("parse", 10, None, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk_id, ChunkId(100));
+        assert_eq!(hits[0].file_path, "src/parser.py");
+    }
+
+    #[test]
+    fn chunk_isolation_from_symbol_search() {
+        let mut store = FullTextStore::create_in_ram().unwrap();
+
+        // Add a symbol and a chunk with the same content
+        let sym = make_symbol(1, "parse", "parser.parse", Language::Python);
+        store.add_document(&sym, Some("def parse(): pass")).unwrap();
+
+        let chunk = make_chunk(200, "src/parser.py", "Parser", "def parse(): pass");
+        store.add_chunk_document(&chunk).unwrap();
+        store.commit().unwrap();
+
+        // Symbol search should only find the symbol, not the chunk
+        let sym_hits = store.search_bm25("parse", 10, None, None).unwrap();
+        assert_eq!(sym_hits.len(), 1);
+        assert_eq!(sym_hits[0].symbol_id, SymbolId(1));
+
+        // Chunk search should only find the chunk, not the symbol
+        let chunk_hits = store.search_bm25_chunks("parse", 10, None, None).unwrap();
+        assert_eq!(chunk_hits.len(), 1);
+        assert_eq!(chunk_hits[0].chunk_id, ChunkId(200));
+    }
+
+    #[test]
+    fn chunk_delete() {
+        let mut store = FullTextStore::create_in_ram().unwrap();
+        let chunk = make_chunk(300, "src/utils.py", "", "def helper(): pass");
+        store.add_chunk_document(&chunk).unwrap();
+        store.commit().unwrap();
+
+        assert_eq!(store.search_bm25_chunks("helper", 10, None, None).unwrap().len(), 1);
+
+        store.delete_chunk_document(ChunkId(300)).unwrap();
+        store.commit().unwrap();
+
+        assert!(store.search_bm25_chunks("helper", 10, None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn chunk_id_hex_round_trip() {
+        let id = ChunkId(0xDEAD_BEEF_CAFE_BABE_1234_5678_9ABC_DEF0);
+        let hex = format!("c:{id}");
+        let parsed = parse_chunk_id_hex(&hex).unwrap();
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn chunk_clear_removes_chunks() {
+        let mut store = FullTextStore::create_in_ram().unwrap();
+        let chunk = make_chunk(400, "src/a.py", "", "def foo(): pass");
+        store.add_chunk_document(&chunk).unwrap();
+        store.commit().unwrap();
+        assert_eq!(store.search_bm25_chunks("foo", 10, None, None).unwrap().len(), 1);
+
+        store.clear().unwrap();
+        assert!(store.search_bm25_chunks("foo", 10, None, None).unwrap().is_empty());
     }
 }

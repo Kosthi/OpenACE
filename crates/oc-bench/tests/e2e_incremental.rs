@@ -15,6 +15,7 @@ fn e2e_incremental_update_consistency() {
         repo_id: "e2e-inc".to_string(),
         batch_size: 1000,
         embedding_dim: 384,
+        ..Default::default()
     };
 
     // Full index
@@ -58,7 +59,7 @@ BATCH_SIZE = 100
 
     // Incremental update
     let inc_report =
-        update_file(tmp.path(), "src/python/service.py", "e2e-inc", &mut storage).unwrap();
+        update_file(tmp.path(), "src/python/service.py", "e2e-inc", &mut storage, None).unwrap();
     assert!(!inc_report.skipped_unchanged_hash);
 
     // Verify: audit_user should exist, process_batch should be gone

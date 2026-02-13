@@ -9,7 +9,7 @@ use oc_indexer::IndexConfig;
 use oc_retrieval::engine::{RetrievalEngine, SearchQuery};
 use oc_storage::manager::StorageManager;
 
-use crate::types::{PyIndexReport, PySearchResult, PySymbol};
+use crate::types::{PyChunkData, PyIndexReport, PySearchResult, PySymbol};
 
 /// Parse a 32-hex-char string into a SymbolId.
 fn parse_symbol_id(hex: &str) -> PyResult<SymbolId> {
@@ -72,7 +72,8 @@ impl EngineBinding {
     ///
     /// After indexing completes, re-opens the StorageManager so that
     /// subsequent queries reflect the newly indexed data.
-    fn index_full(&self, py: Python<'_>, repo_root: &str) -> PyResult<PyIndexReport> {
+    #[pyo3(signature = (repo_root, chunk_enabled=false))]
+    fn index_full(&self, py: Python<'_>, repo_root: &str, chunk_enabled: bool) -> PyResult<PyIndexReport> {
         let path = PathBuf::from(repo_root);
         let repo_id = self.repo_id.clone();
         let project_root = self.project_root.clone();
@@ -84,6 +85,8 @@ impl EngineBinding {
                 repo_id,
                 batch_size: 1000,
                 embedding_dim: dim,
+                chunk_enabled,
+                ..Default::default()
             };
             let report = oc_indexer::index(&path, &config)
                 .map(PyIndexReport::from)
@@ -102,7 +105,7 @@ impl EngineBinding {
     }
 
     /// Search for symbols using multi-signal retrieval.
-    #[pyo3(signature = (text, query_vector=None, limit=None, language=None, file_path=None))]
+    #[pyo3(signature = (text, query_vector=None, limit=None, language=None, file_path=None, enable_chunk_search=false))]
     fn search(
         &self,
         py: Python<'_>,
@@ -111,6 +114,7 @@ impl EngineBinding {
         limit: Option<usize>,
         language: Option<&str>,
         file_path: Option<&str>,
+        enable_chunk_search: bool,
     ) -> PyResult<Vec<PySearchResult>> {
         let text = text.to_string();
         let lang = language.and_then(parse_language);
@@ -130,6 +134,7 @@ impl EngineBinding {
             query.language_filter = lang;
             query.file_path_filter = fp;
             query.query_vector = query_vector;
+            query.enable_chunk_search = enable_chunk_search;
 
             let engine = RetrievalEngine::new(&mgr);
             let results = engine
@@ -259,6 +264,51 @@ impl EngineBinding {
             mgr.graph()
                 .count_symbols()
                 .map_err(|e| PyRuntimeError::new_err(format!("count_symbols failed: {e}")))
+        })
+    }
+
+    /// Count total number of chunks in the store.
+    fn count_chunks(&self, py: Python<'_>) -> PyResult<usize> {
+        let inner = Arc::clone(&self.inner);
+
+        py.allow_threads(move || {
+            let mgr = inner
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(format!("lock poisoned: {e}")))?;
+
+            mgr.graph()
+                .count_chunks()
+                .map_err(|e| PyRuntimeError::new_err(format!("count_chunks failed: {e}")))
+        })
+    }
+
+    /// List chunks with pagination for embedding backfill.
+    fn list_chunks_for_embedding(
+        &self,
+        py: Python<'_>,
+        limit: usize,
+        offset: usize,
+    ) -> PyResult<Vec<PyChunkData>> {
+        let inner = Arc::clone(&self.inner);
+
+        py.allow_threads(move || {
+            let mgr = inner
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(format!("lock poisoned: {e}")))?;
+
+            let chunks = mgr.graph().list_chunks(limit, offset).map_err(|e| {
+                PyRuntimeError::new_err(format!("list_chunks failed: {e}"))
+            })?;
+
+            Ok(chunks
+                .into_iter()
+                .map(|c| PyChunkData {
+                    id: format!("{}", c.id),
+                    file_path: c.file_path.to_string_lossy().into_owned(),
+                    context_path: c.context_path,
+                    content: c.content,
+                })
+                .collect())
         })
     }
 

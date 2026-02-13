@@ -25,6 +25,16 @@ class Symbol:
 
 
 @dataclass(frozen=True)
+class ChunkInfo:
+    """Information about a chunk that boosted a search result."""
+    context_path: str
+    chunk_score: float
+
+    def __repr__(self) -> str:
+        return f"ChunkInfo(context={self.context_path!r}, score={self.chunk_score:.4f})"
+
+
+@dataclass(frozen=True)
 class SearchResult:
     """A search result with relevance score and provenance."""
     symbol_id: str
@@ -38,6 +48,7 @@ class SearchResult:
     match_signals: list[str] = field(default_factory=list)
     related_symbols: list[SearchResult] = field(default_factory=list)
     snippet: Optional[str] = None
+    chunk_info: Optional[ChunkInfo] = None
 
     def __repr__(self) -> str:
         return (
@@ -56,11 +67,13 @@ class IndexReport:
     total_symbols: int
     total_relations: int
     duration_secs: float
+    total_chunks: int = 0
 
     def __repr__(self) -> str:
         return (
             f"IndexReport(files={self.files_indexed}, symbols={self.total_symbols}, "
-            f"relations={self.total_relations}, duration={self.duration_secs:.2f}s)"
+            f"relations={self.total_relations}, chunks={self.total_chunks}, "
+            f"duration={self.duration_secs:.2f}s)"
         )
 
 

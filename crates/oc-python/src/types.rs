@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 
 use oc_core::{CodeRelation, CodeSymbol, RelationKind, SymbolKind};
 use oc_indexer::IndexReport;
-use oc_retrieval::SearchResult;
+use oc_retrieval::{ChunkInfo, SearchResult};
 
 /// Python-compatible symbol representation.
 #[pyclass(frozen)]
@@ -84,6 +84,8 @@ pub struct PySearchResult {
     pub related_symbols: Vec<PySearchResult>,
     #[pyo3(get)]
     pub snippet: Option<String>,
+    #[pyo3(get)]
+    pub chunk_info: Option<PyChunkInfo>,
 }
 
 #[pymethods]
@@ -109,7 +111,61 @@ impl From<SearchResult> for PySearchResult {
             match_signals: r.match_signals,
             related_symbols: r.related_symbols.into_iter().map(PySearchResult::from).collect(),
             snippet: r.snippet,
+            chunk_info: r.chunk_info.map(PyChunkInfo::from),
         }
+    }
+}
+
+/// Python-compatible chunk info.
+#[pyclass(frozen)]
+#[derive(Clone)]
+pub struct PyChunkInfo {
+    #[pyo3(get)]
+    pub context_path: String,
+    #[pyo3(get)]
+    pub chunk_score: f32,
+}
+
+#[pymethods]
+impl PyChunkInfo {
+    fn __repr__(&self) -> String {
+        format!(
+            "ChunkInfo(context={:?}, score={:.4})",
+            self.context_path, self.chunk_score
+        )
+    }
+}
+
+impl From<ChunkInfo> for PyChunkInfo {
+    fn from(c: ChunkInfo) -> Self {
+        Self {
+            context_path: c.context_path,
+            chunk_score: c.chunk_score,
+        }
+    }
+}
+
+/// Python-compatible chunk data for embedding backfill.
+#[pyclass(frozen)]
+#[derive(Clone)]
+pub struct PyChunkData {
+    #[pyo3(get)]
+    pub id: String,
+    #[pyo3(get)]
+    pub file_path: String,
+    #[pyo3(get)]
+    pub context_path: String,
+    #[pyo3(get)]
+    pub content: String,
+}
+
+#[pymethods]
+impl PyChunkData {
+    fn __repr__(&self) -> String {
+        format!(
+            "ChunkData(file={:?}, context={:?})",
+            self.file_path, self.context_path
+        )
     }
 }
 
@@ -130,6 +186,8 @@ pub struct PyIndexReport {
     #[pyo3(get)]
     pub total_relations: usize,
     #[pyo3(get)]
+    pub total_chunks: usize,
+    #[pyo3(get)]
     pub duration_secs: f64,
 }
 
@@ -137,8 +195,9 @@ pub struct PyIndexReport {
 impl PyIndexReport {
     fn __repr__(&self) -> String {
         format!(
-            "IndexReport(files={}, symbols={}, relations={}, duration={:.2}s)",
-            self.files_indexed, self.total_symbols, self.total_relations, self.duration_secs
+            "IndexReport(files={}, symbols={}, relations={}, chunks={}, duration={:.2}s)",
+            self.files_indexed, self.total_symbols, self.total_relations,
+            self.total_chunks, self.duration_secs
         )
     }
 }
@@ -152,6 +211,7 @@ impl From<IndexReport> for PyIndexReport {
             files_failed: r.files_failed,
             total_symbols: r.total_symbols,
             total_relations: r.total_relations,
+            total_chunks: r.total_chunks,
             duration_secs: r.duration.as_secs_f64(),
         }
     }

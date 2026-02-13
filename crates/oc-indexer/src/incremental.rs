@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use oc_core::{CodeRelation, CodeSymbol, SymbolId};
-use oc_parser::{is_binary, parse_file, ParserRegistry};
+use oc_parser::{chunk_file, is_binary, parse_file_with_tree, ChunkConfig, ParserRegistry};
 use oc_storage::graph::FileMetadata;
 use oc_storage::manager::StorageManager;
 
@@ -92,11 +92,14 @@ pub struct IncrementalReport {
 /// → Tantivy update → files table update.
 ///
 /// SQLite is committed first; Tantivy updates happen only after SQLite succeeds.
+///
+/// If `chunk_config` is Some, chunks will be re-indexed for the file.
 pub fn update_file(
     project_path: &Path,
     rel_path: &str,
     repo_id: &str,
     storage: &mut StorageManager,
+    chunk_config: Option<&ChunkConfig>,
 ) -> Result<IncrementalReport, IndexerError> {
     let abs_path = project_path.join(rel_path);
 
@@ -128,7 +131,7 @@ pub fn update_file(
     let content = match fs::read(&abs_path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return delete_file(rel_path, storage);
+            return delete_file(rel_path, storage, chunk_config.is_some());
         }
         Err(e) => return Err(IndexerError::Io(e)),
     };
@@ -177,9 +180,9 @@ pub fn update_file(
     })?;
 
     // Re-parse
-    let parse_output = parse_file(repo_id, rel_path, &content, file_size)?;
-    let mut new_symbols = parse_output.symbols;
-    let new_relations = parse_output.relations;
+    let parse_result = parse_file_with_tree(repo_id, rel_path, &content, file_size)?;
+    let mut new_symbols = parse_result.output.symbols;
+    let new_relations = parse_result.output.relations;
     let content_hash = xxhash_rust::xxh3::xxh3_64(&content);
 
     // Build body text map from source bytes for fulltext indexing,
@@ -293,15 +296,44 @@ pub fn update_file(
         storage.fulltext_mut().add_document(sym, body)?;
     }
 
+    // Phase 3: Chunk updates (only when chunk_config is provided)
+    if let Some(cfg) = chunk_config {
+        // Delete old chunks for this file
+        let old_chunks = storage.graph().get_chunks_by_file(rel_path)?;
+        for c in &old_chunks {
+            let _ = storage.fulltext_mut().delete_chunk_document(c.id);
+        }
+        storage.graph_mut().delete_chunks_by_file(rel_path)?;
+
+        // Re-chunk and insert
+        let new_chunks = chunk_file(
+            repo_id,
+            rel_path,
+            &parse_result.source,
+            &parse_result.tree,
+            parse_result.language,
+            cfg,
+        );
+        if !new_chunks.is_empty() {
+            storage
+                .graph_mut()
+                .insert_chunks(&new_chunks, INCREMENTAL_BATCH_SIZE)?;
+            for chunk in &new_chunks {
+                let _ = storage.fulltext_mut().add_chunk_document(chunk);
+            }
+        }
+    }
+
     Ok(report)
 }
 
-/// Handle a file deletion: remove all symbols, relations, Tantivy docs, and file metadata.
+/// Handle a file deletion: remove all symbols, relations, chunks, Tantivy docs, and file metadata.
 ///
 /// Write ordering: SQLite first, then Tantivy.
 pub fn delete_file(
     rel_path: &str,
     storage: &mut StorageManager,
+    chunk_enabled: bool,
 ) -> Result<IncrementalReport, IndexerError> {
     // Get all symbols for this file before deleting
     let old_symbols = storage.graph().get_symbols_by_file(rel_path)?;
@@ -313,9 +345,21 @@ pub fn delete_file(
     // Delete file metadata
     storage.graph_mut().delete_file(rel_path)?;
 
+    // Delete chunks if enabled
+    let old_chunks = if chunk_enabled {
+        let chunks = storage.graph().get_chunks_by_file(rel_path)?;
+        storage.graph_mut().delete_chunks_by_file(rel_path)?;
+        chunks
+    } else {
+        Vec::new()
+    };
+
     // Phase 2: Tantivy (only after SQLite succeeds)
     for sym in &old_symbols {
         storage.fulltext_mut().delete_document(sym.id)?;
+    }
+    for chunk in &old_chunks {
+        let _ = storage.fulltext_mut().delete_chunk_document(chunk.id);
     }
 
     Ok(IncrementalReport {
@@ -336,6 +380,7 @@ pub fn process_events(
     events: &[ChangeEvent],
     repo_id: &str,
     storage: &mut StorageManager,
+    chunk_config: Option<&ChunkConfig>,
 ) -> Vec<Result<IncrementalReport, IndexerError>> {
     // Deduplicate events: keep only the latest event per path
     let mut latest: HashMap<String, &ChangeEvent> = HashMap::new();
@@ -351,8 +396,10 @@ pub fn process_events(
     latest
         .into_iter()
         .map(|(path, event)| match event {
-            ChangeEvent::Changed(_) => update_file(project_path, &path, repo_id, storage),
-            ChangeEvent::Removed(_) => delete_file(&path, storage),
+            ChangeEvent::Changed(_) => {
+                update_file(project_path, &path, repo_id, storage, chunk_config)
+            }
+            ChangeEvent::Removed(_) => delete_file(&path, storage, chunk_config.is_some()),
         })
         .collect()
 }
