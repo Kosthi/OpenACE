@@ -111,8 +111,10 @@ def main():
               help="Embedding provider to use.")
 @click.option("--reranker", type=click.Choice(RERANKER_CHOICES), default="auto",
               help="Reranker backend (default: auto, matches embedding).")
+@click.option("--chunk/--no-chunk", default=True,
+              help="Enable AST chunk-level indexing (default: on).")
 @_provider_options
-def index(path: str, embedding: str, reranker: str,
+def index(path: str, embedding: str, reranker: str, chunk: bool,
           embedding_base_url, embedding_api_key, embedding_dim,
           reranker_base_url, reranker_api_key):
     """Index a project directory."""
@@ -130,7 +132,7 @@ def index(path: str, embedding: str, reranker: str,
         reranker_base_url=reranker_base_url,
         reranker_api_key=reranker_api_key,
     )
-    engine = Engine(project_path, **engine_kwargs)
+    engine = Engine(project_path, chunk_enabled=chunk, **engine_kwargs)
     report = engine.index()
 
     click.echo(f"\nIndexing complete:")
@@ -140,6 +142,8 @@ def index(path: str, embedding: str, reranker: str,
     click.echo(f"  Files failed:   {report.files_failed}")
     click.echo(f"  Symbols:        {report.total_symbols}")
     click.echo(f"  Relations:      {report.total_relations}")
+    if report.total_chunks > 0:
+        click.echo(f"  Chunks:         {report.total_chunks}")
     click.echo(f"  Duration:       {report.duration_secs:.2f}s")
 
 
@@ -153,12 +157,14 @@ def index(path: str, embedding: str, reranker: str,
               help="Reranker backend (default: auto, matches embedding).")
 @click.option("--expansion", type=click.Choice(EXPANSION_CHOICES), default="none",
               help="Query expansion backend for improved recall.")
+@click.option("--chunk/--no-chunk", default=True,
+              help="Enable AST chunk-level search (default: on).")
 @click.option("--limit", "-n", default=10, help="Max results.")
 @click.option("--language", "-l", default=None, help="Language filter.")
 @click.option("--file-path", "-f", default=None, help="File path prefix filter.")
 @_provider_options
 def search(query: str, path: str, embedding: str, reranker: str, expansion: str,
-           limit: int, language: str, file_path: str,
+           chunk: bool, limit: int, language: str, file_path: str,
            embedding_base_url, embedding_api_key, embedding_dim,
            reranker_base_url, reranker_api_key):
     """Search for symbols in an indexed project."""
@@ -174,7 +180,7 @@ def search(query: str, path: str, embedding: str, reranker: str, expansion: str,
         reranker_base_url=reranker_base_url,
         reranker_api_key=reranker_api_key,
     )
-    engine = Engine(project_path, **engine_kwargs)
+    engine = Engine(project_path, chunk_enabled=chunk, **engine_kwargs)
     results = engine.search(query, limit=limit, language=language, file_path=file_path)
 
     if not results:
@@ -213,8 +219,10 @@ def search(query: str, path: str, embedding: str, reranker: str, expansion: str,
               envvar="OPENACE_RERANKER", help="Reranker backend (default: auto, matches embedding).")
 @click.option("--expansion", type=click.Choice(EXPANSION_CHOICES), default="none",
               envvar="OPENACE_EXPANSION", help="Query expansion backend.")
+@click.option("--chunk/--no-chunk", default=True,
+              help="Enable AST chunk-level indexing and search (default: on).")
 @_provider_options
-def serve(path: str, embedding: str, reranker: str, expansion: str,
+def serve(path: str, embedding: str, reranker: str, expansion: str, chunk: bool,
           embedding_base_url, embedding_api_key, embedding_dim,
           reranker_base_url, reranker_api_key):
     """Start MCP server on stdio."""
@@ -242,22 +250,13 @@ def serve(path: str, embedding: str, reranker: str, expansion: str,
             reranker_base_url=reranker_base_url,
             reranker_api_key=reranker_api_key,
         )
-        engine = Engine(project_path, **engine_kwargs)
+        engine = Engine(project_path, chunk_enabled=chunk, **engine_kwargs)
     except click.ClickException:
         raise
     except Exception as e:
         raise click.ClickException(str(e))
 
-    # Index on startup
-    click.echo("Indexing project...", err=True)
-    report = engine.index()
-    click.echo(
-        f"Indexed {report.files_indexed} files, "
-        f"{report.total_symbols} symbols in {report.duration_secs:.2f}s",
-        err=True,
-    )
-
-    server = create_server(engine)
+    server = create_server(engine, auto_index=True)
 
     async def run():
         from mcp.server.stdio import stdio_server

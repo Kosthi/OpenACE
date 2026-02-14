@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -31,13 +31,23 @@ fn parse_language(name: &str) -> Option<Language> {
     }
 }
 
+/// Acquire the mutex and return a guard, failing if poisoned.
+fn lock_inner(
+    inner: &Mutex<Option<StorageManager>>,
+) -> PyResult<MutexGuard<'_, Option<StorageManager>>> {
+    inner
+        .lock()
+        .map_err(|e| PyRuntimeError::new_err(format!("lock poisoned: {e}")))
+}
+
 /// Core engine binding wrapping the Rust StorageManager for Python access.
 ///
 /// All heavy operations release the GIL via `py.allow_threads()`.
-/// The StorageManager is wrapped in `Arc<Mutex<>>` for safe concurrent access.
+/// The StorageManager is wrapped in `Arc<Mutex<Option<>>>` so that indexing
+/// can temporarily drop it (releasing the Tantivy lock) before re-opening.
 #[pyclass]
 pub struct EngineBinding {
-    inner: Arc<Mutex<StorageManager>>,
+    inner: Arc<Mutex<Option<StorageManager>>>,
     project_root: PathBuf,
     embedding_dim: usize,
     repo_id: String,
@@ -61,7 +71,7 @@ impl EngineBinding {
         let repo_id = project_root.to_string();
 
         Ok(Self {
-            inner: Arc::new(Mutex::new(mgr)),
+            inner: Arc::new(Mutex::new(Some(mgr))),
             project_root: path,
             embedding_dim: dim,
             repo_id,
@@ -70,8 +80,8 @@ impl EngineBinding {
 
     /// Run full indexing pipeline on the project.
     ///
-    /// After indexing completes, re-opens the StorageManager so that
-    /// subsequent queries reflect the newly indexed data.
+    /// Temporarily drops the StorageManager to release the Tantivy lock,
+    /// runs the indexer (which opens its own), then re-opens for queries.
     #[pyo3(signature = (repo_root, chunk_enabled=false))]
     fn index_full(&self, py: Python<'_>, repo_root: &str, chunk_enabled: bool) -> PyResult<PyIndexReport> {
         let path = PathBuf::from(repo_root);
@@ -81,6 +91,13 @@ impl EngineBinding {
         let inner = Arc::clone(&self.inner);
 
         py.allow_threads(move || {
+            // Drop the existing StorageManager to release the Tantivy lock
+            // before the indexer opens its own.
+            {
+                let mut locked = lock_inner(&inner)?;
+                *locked = None;
+            }
+
             let config = IndexConfig {
                 repo_id,
                 batch_size: 1000,
@@ -88,19 +105,19 @@ impl EngineBinding {
                 chunk_enabled,
                 ..Default::default()
             };
-            let report = oc_indexer::index(&path, &config)
+            let result = oc_indexer::index(&path, &config)
                 .map(PyIndexReport::from)
-                .map_err(|e| PyRuntimeError::new_err(format!("indexing failed: {e}")))?;
+                .map_err(|e| PyRuntimeError::new_err(format!("indexing failed: {e}")));
 
             // Re-open StorageManager so queries use fresh data
             let fresh_mgr = StorageManager::open_with_dimension(&project_root, dim)
                 .map_err(|e| PyRuntimeError::new_err(format!("failed to reopen storage: {e}")))?;
-            let mut locked = inner
-                .lock()
-                .map_err(|e| PyRuntimeError::new_err(format!("lock poisoned: {e}")))?;
-            *locked = fresh_mgr;
+            {
+                let mut locked = lock_inner(&inner)?;
+                *locked = Some(fresh_mgr);
+            }
 
-            Ok(report)
+            result
         })
     }
 
@@ -123,9 +140,10 @@ impl EngineBinding {
         let inner = Arc::clone(&self.inner);
 
         py.allow_threads(move || {
-            let mgr = inner
-                .lock()
-                .map_err(|e| PyRuntimeError::new_err(format!("lock poisoned: {e}")))?;
+            let locked = lock_inner(&inner)?;
+            let mgr = locked
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("storage unavailable (indexing in progress)"))?;
 
             let mut query = SearchQuery::new(&text);
             if let Some(lim) = limit {
@@ -136,7 +154,7 @@ impl EngineBinding {
             query.query_vector = query_vector;
             query.enable_chunk_search = enable_chunk_search;
 
-            let engine = RetrievalEngine::new(&mgr);
+            let engine = RetrievalEngine::new(mgr);
             let results = engine
                 .search(&query)
                 .map_err(|e| PyRuntimeError::new_err(format!("search failed: {e}")))?;
@@ -151,9 +169,10 @@ impl EngineBinding {
         let inner = Arc::clone(&self.inner);
 
         py.allow_threads(move || {
-            let mgr = inner
-                .lock()
-                .map_err(|e| PyRuntimeError::new_err(format!("lock poisoned: {e}")))?;
+            let locked = lock_inner(&inner)?;
+            let mgr = locked
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("storage unavailable (indexing in progress)"))?;
 
             let mut results = Vec::new();
             let mut seen = std::collections::HashSet::new();
@@ -184,9 +203,10 @@ impl EngineBinding {
         let inner = Arc::clone(&self.inner);
 
         py.allow_threads(move || {
-            let mgr = inner
-                .lock()
-                .map_err(|e| PyRuntimeError::new_err(format!("lock poisoned: {e}")))?;
+            let locked = lock_inner(&inner)?;
+            let mgr = locked
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("storage unavailable (indexing in progress)"))?;
 
             let syms = mgr.graph().get_symbols_by_file(&path).map_err(|e| {
                 PyRuntimeError::new_err(format!("get_file_outline failed: {e}"))
@@ -215,9 +235,10 @@ impl EngineBinding {
         let inner = Arc::clone(&self.inner);
 
         py.allow_threads(move || {
-            let mut mgr = inner
-                .lock()
-                .map_err(|e| PyRuntimeError::new_err(format!("lock poisoned: {e}")))?;
+            let mut locked = lock_inner(&inner)?;
+            let mgr = locked
+                .as_mut()
+                .ok_or_else(|| PyRuntimeError::new_err("storage unavailable (indexing in progress)"))?;
 
             for (hex, vec) in ids.iter().zip(vectors.iter()) {
                 let sym_id = parse_symbol_id(hex)?;
@@ -240,9 +261,10 @@ impl EngineBinding {
         let inner = Arc::clone(&self.inner);
 
         py.allow_threads(move || {
-            let mgr = inner
-                .lock()
-                .map_err(|e| PyRuntimeError::new_err(format!("lock poisoned: {e}")))?;
+            let locked = lock_inner(&inner)?;
+            let mgr = locked
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("storage unavailable (indexing in progress)"))?;
 
             let syms = mgr.graph().list_symbols(limit, offset).map_err(|e| {
                 PyRuntimeError::new_err(format!("list_symbols failed: {e}"))
@@ -257,9 +279,10 @@ impl EngineBinding {
         let inner = Arc::clone(&self.inner);
 
         py.allow_threads(move || {
-            let mgr = inner
-                .lock()
-                .map_err(|e| PyRuntimeError::new_err(format!("lock poisoned: {e}")))?;
+            let locked = lock_inner(&inner)?;
+            let mgr = locked
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("storage unavailable (indexing in progress)"))?;
 
             mgr.graph()
                 .count_symbols()
@@ -272,9 +295,10 @@ impl EngineBinding {
         let inner = Arc::clone(&self.inner);
 
         py.allow_threads(move || {
-            let mgr = inner
-                .lock()
-                .map_err(|e| PyRuntimeError::new_err(format!("lock poisoned: {e}")))?;
+            let locked = lock_inner(&inner)?;
+            let mgr = locked
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("storage unavailable (indexing in progress)"))?;
 
             mgr.graph()
                 .count_chunks()
@@ -292,9 +316,10 @@ impl EngineBinding {
         let inner = Arc::clone(&self.inner);
 
         py.allow_threads(move || {
-            let mgr = inner
-                .lock()
-                .map_err(|e| PyRuntimeError::new_err(format!("lock poisoned: {e}")))?;
+            let locked = lock_inner(&inner)?;
+            let mgr = locked
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("storage unavailable (indexing in progress)"))?;
 
             let chunks = mgr.graph().list_chunks(limit, offset).map_err(|e| {
                 PyRuntimeError::new_err(format!("list_chunks failed: {e}"))
@@ -317,9 +342,10 @@ impl EngineBinding {
         let inner = Arc::clone(&self.inner);
 
         py.allow_threads(move || {
-            let mut mgr = inner
-                .lock()
-                .map_err(|e| PyRuntimeError::new_err(format!("lock poisoned: {e}")))?;
+            let mut locked = lock_inner(&inner)?;
+            let mgr = locked
+                .as_mut()
+                .ok_or_else(|| PyRuntimeError::new_err("storage unavailable (indexing in progress)"))?;
 
             mgr.flush()
                 .map_err(|e| PyRuntimeError::new_err(format!("flush failed: {e}")))

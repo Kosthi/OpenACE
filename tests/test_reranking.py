@@ -194,8 +194,9 @@ class TestEngineRerankerIntegration:
         engine = Engine(str(sample_project), reranker=mock, rerank_pool_size=50)
         engine.index()
         engine.search("process_data", limit=5)
-        # Engine should pass top_k=limit to the reranker
-        assert mock.received_top_k == 5
+        # Engine passes the full retrieval pool size to the reranker so it
+        # can score all candidates before file-level dedup and final limit.
+        assert mock.received_top_k == 50
         # The reranker should receive results from the expanded retrieval pool
         # (up to what's available in the index), not just `limit` results.
         # We also verify the engine computed the pool correctly by checking
