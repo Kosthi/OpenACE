@@ -27,6 +27,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
+          attestations: false
 
   publish-npm:
     runs-on: ubuntu-latest
