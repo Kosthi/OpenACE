@@ -17,6 +17,19 @@ fn is_sqlite_corruption(err: &rusqlite::Error) -> bool {
     }
 }
 
+/// Tantivy errors that indicate a corrupted or incompatible index.
+///
+/// Lock failures, IO errors, thread panics, and query/argument errors are
+/// transient or programming mistakes and must NOT cause a purge.
+fn is_tantivy_corruption(err: &tantivy::TantivyError) -> bool {
+    matches!(
+        err,
+        tantivy::TantivyError::DataCorruption(_)
+            | tantivy::TantivyError::IncompatibleIndex(_)
+            | tantivy::TantivyError::SchemaError(_)
+    )
+}
+
 /// Default vector dimension (placeholder; real dimension comes from the embedding model).
 const DEFAULT_VECTOR_DIMENSION: usize = 384;
 
@@ -125,13 +138,18 @@ impl StorageManager {
     }
 
     /// Decide whether an error warrants purging the entire `.openace/` directory.
+    ///
+    /// Only purge on errors that indicate actual data corruption or schema
+    /// incompatibility.  Transient errors (lock conflicts, IO timeouts, thread
+    /// panics) must NOT trigger a purge -- doing so would silently destroy a
+    /// valid index.
     fn should_purge(err: &StorageError) -> bool {
         match err {
             StorageError::SchemaMismatch { .. }
             | StorageError::VectorIndexUnavailable { .. }
             | StorageError::FullTextIndexUnavailable { .. } => true,
             StorageError::Sqlite(e) => is_sqlite_corruption(e),
-            StorageError::Tantivy(_) => true,
+            StorageError::Tantivy(e) => is_tantivy_corruption(e),
             _ => false,
         }
     }

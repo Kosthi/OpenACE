@@ -19,6 +19,41 @@ const BATCH_TIME_THRESHOLD: Duration = Duration::from_millis(500);
 // Code-aware tokenizer
 // ---------------------------------------------------------------------------
 
+/// Check if a character is a CJK Unified Ideograph.
+fn is_cjk(ch: char) -> bool {
+    matches!(ch,
+        '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs
+        | '\u{3400}'..='\u{4DBF}' // CJK Extension A
+        | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
+    )
+}
+
+/// Decode a CJK character at the given byte position.
+/// Returns the char and its UTF-8 byte length, or None if not CJK.
+fn decode_cjk_at(text: &[u8], pos: usize) -> Option<(char, usize)> {
+    if pos >= text.len() {
+        return None;
+    }
+    let s = std::str::from_utf8(&text[pos..]).ok()?;
+    let ch = s.chars().next()?;
+    if is_cjk(ch) {
+        Some((ch, ch.len_utf8()))
+    } else {
+        None
+    }
+}
+
+/// Return the byte length of a UTF-8 character from its first byte.
+fn utf8_char_len(first_byte: u8) -> usize {
+    match first_byte {
+        0..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => 1, // invalid, advance 1 byte
+    }
+}
+
 /// Splits identifiers on camelCase, PascalCase, snake_case, and digit boundaries.
 ///
 /// Equivalent to the regex `[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\b)|[A-Z]+|[0-9]+`
@@ -52,6 +87,7 @@ impl Tokenizer for CodeTokenizer {
             text: text.as_bytes(),
             pos: 0,
             token: &mut self.token,
+            pending_cjk_offset: None,
         }
     }
 }
@@ -60,21 +96,99 @@ struct CodeTokenStream<'a> {
     text: &'a [u8],
     pos: usize,
     token: &'a mut Token,
+    /// When inside a CJK run, stores the byte offset of the second char
+    /// of the current bigram (so the next call re-uses it as the first char).
+    pending_cjk_offset: Option<usize>,
 }
 
 impl<'a> TokenStream for CodeTokenStream<'a> {
     fn advance(&mut self) -> bool {
         let len = self.text.len();
 
-        // Skip non-alphanumeric characters (underscores, dots, punctuation, etc.)
-        while self.pos < len && !self.text[self.pos].is_ascii_alphanumeric() {
-            self.pos += 1;
+        // If we have a pending CJK bigram continuation, resume from the second
+        // char of the previous bigram (it becomes the first char of the next).
+        if let Some(second_offset) = self.pending_cjk_offset.take() {
+            self.pos = second_offset;
+
+            // Try to form next bigram starting from second_offset
+            if let Some((ch1, len1)) = decode_cjk_at(self.text, self.pos) {
+                let next_pos = self.pos + len1;
+                if let Some((ch2, len2)) = decode_cjk_at(self.text, next_pos) {
+                    // Emit bigram ch1+ch2, set pending to ch2's offset
+                    let start = self.pos;
+                    self.pending_cjk_offset = Some(next_pos);
+                    self.pos = next_pos + len2;
+
+                    self.token.text.clear();
+                    self.token.text.push(ch1);
+                    self.token.text.push(ch2);
+                    self.token.offset_from = start;
+                    self.token.offset_to = self.pos;
+                    self.token.position = self.token.position.wrapping_add(1);
+                    return true;
+                } else {
+                    // Single trailing CJK char — no bigram possible.
+                    // Don't emit it as unigram since it was already part of
+                    // the previous bigram. Fall through to normal scanning.
+                    self.pos = next_pos;
+                }
+            }
+            // pending offset pointed to non-CJK; fall through to normal scan
+        }
+
+        // Skip non-alphanumeric, non-CJK characters
+        while self.pos < len {
+            let b = self.text[self.pos];
+            if b.is_ascii_alphanumeric() {
+                break; // start ASCII token
+            }
+            if !b.is_ascii() {
+                if decode_cjk_at(self.text, self.pos).is_some() {
+                    break; // start CJK bigram
+                }
+                // Non-CJK non-ASCII: skip the full UTF-8 character
+                self.pos += utf8_char_len(b);
+                continue;
+            }
+            self.pos += 1; // ASCII non-alphanumeric (underscore, punctuation, etc.)
         }
 
         if self.pos >= len {
             return false;
         }
 
+        // --- CJK bigram branch ---
+        if !self.text[self.pos].is_ascii() {
+            if let Some((ch1, len1)) = decode_cjk_at(self.text, self.pos) {
+                let start = self.pos;
+                let next_pos = self.pos + len1;
+                if let Some((ch2, len2)) = decode_cjk_at(self.text, next_pos) {
+                    // Emit bigram ch1+ch2
+                    self.pending_cjk_offset = Some(next_pos);
+                    self.pos = next_pos + len2;
+
+                    self.token.text.clear();
+                    self.token.text.push(ch1);
+                    self.token.text.push(ch2);
+                    self.token.offset_from = start;
+                    self.token.offset_to = self.pos;
+                    self.token.position = self.token.position.wrapping_add(1);
+                    return true;
+                } else {
+                    // Single CJK char at end or before non-CJK: emit as unigram
+                    self.pos = next_pos;
+
+                    self.token.text.clear();
+                    self.token.text.push(ch1);
+                    self.token.offset_from = start;
+                    self.token.offset_to = self.pos;
+                    self.token.position = self.token.position.wrapping_add(1);
+                    return true;
+                }
+            }
+        }
+
+        // --- ASCII token branches (unchanged) ---
         let start = self.pos;
         let first = self.text[start];
         self.pos += 1;
@@ -992,5 +1106,60 @@ mod tests {
 
         store.clear().unwrap();
         assert!(store.search_bm25_chunks("foo", 10, None, None).unwrap().is_empty());
+    }
+
+    // --- CJK bigram tokenization ---
+
+    #[test]
+    fn tokenizer_cjk_bigram() {
+        // "识别框" → ["识别", "别框"]
+        assert_eq!(tokenize("识别框"), vec!["识别", "别框"]);
+    }
+
+    #[test]
+    fn tokenizer_cjk_single_char() {
+        // Single CJK char → unigram
+        assert_eq!(tokenize("框"), vec!["框"]);
+    }
+
+    #[test]
+    fn tokenizer_cjk_two_chars() {
+        assert_eq!(tokenize("识别"), vec!["识别"]);
+    }
+
+    #[test]
+    fn tokenizer_mixed_ascii_cjk() {
+        // "box识别框detect" → ["box", "识别", "别框", "detect"]
+        assert_eq!(tokenize("box识别框detect"), vec!["box", "识别", "别框", "detect"]);
+    }
+
+    #[test]
+    fn tokenizer_cjk_in_comment() {
+        // Simulates a Python comment with CJK
+        assert_eq!(
+            tokenize("# 不相交直接退出检测"),
+            vec!["不相", "相交", "交直", "直接", "接退", "退出", "出检", "检测"]
+        );
+    }
+
+    #[test]
+    fn tokenizer_cjk_mixed_with_snake_case() {
+        assert_eq!(
+            tokenize("calculate_iou # 计算交集"),
+            vec!["calculate", "iou", "计算", "算交", "交集"]
+        );
+    }
+
+    #[test]
+    fn cjk_bm25_search() {
+        let mut store = FullTextStore::create_in_ram().unwrap();
+        let sym = make_symbol(5000, "merge_det_boxes", "ocr_utils.merge_det_boxes", Language::Python);
+        store.add_document(&sym, Some("def merge_det_boxes(dt_boxes):\n    # 不相交直接退出检测\n    pass")).unwrap();
+        store.commit().unwrap();
+
+        // Chinese query should find via CJK bigram matching on comment
+        let hits = store.search_bm25("检测", 10, None, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].symbol_id, SymbolId(5000));
     }
 }
