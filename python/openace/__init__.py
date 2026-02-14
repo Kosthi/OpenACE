@@ -1,6 +1,6 @@
 """OpenACE - AI-native Contextual Code Engine."""
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 
 def __getattr__(name):
