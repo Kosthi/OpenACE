@@ -5,65 +5,18 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: read
-
 jobs:
-  # Build wheels for multiple platforms
   build:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: macos-14
-            target: x86_64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
+    uses: ./.github/workflows/build.yml
+    with:
+      upload-artifacts: true
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --out dist -i python3.12
-          manylinux: 2_28
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-${{ matrix.target }}
-          path: dist/
-
-  # Build source distribution
-  sdist:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build sdist
-        uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sdist
-          path: dist/
-
-  # Publish to PyPI
   publish:
-    needs: [build, sdist]
+    needs: [build]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write  # trusted publishing
+      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -73,12 +26,11 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
-  # Publish npm wrapper (OIDC trusted publishing)
   publish-npm:
     runs-on: ubuntu-latest
     environment: npm
     permissions:
-      id-token: write  # OIDC trusted publishing
+      id-token: write
     defaults:
       run:
         working-directory: npm

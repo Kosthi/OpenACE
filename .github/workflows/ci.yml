@@ -20,71 +20,27 @@ on:
       - ".gitignore"
       - "docs/**"
 
-permissions:
-  contents: read
-
 jobs:
-  rust-test:
+  # Skip CI when a release tag points at this commit (release workflow handles it)
+  check-release:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    outputs:
+      is-release: ${{ steps.check.outputs.is-release }}
     steps:
       - uses: actions/checkout@v4
+      - id: check
+        run: |
+          git fetch --tags
+          if git tag --points-at HEAD | grep -q '^v'; then
+            echo "is-release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is-release=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Run Rust tests
-        run: cargo test --workspace
-
-  python-test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Build extension
-        uses: PyO3/maturin-action@v1
-        with:
-          args: --release
-          manylinux: 2_28
-
-      - name: Install package and test deps
-        run: pip install -e ".[dev]"
-
-      - name: Run Python tests
-        run: pytest tests/ -x
-
-  build-check:
-    if: github.event_name == 'pull_request'
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: macos-14
-            target: x86_64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Build wheel
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --out dist -i python3.12
-          manylinux: 2_28
+  build:
+    needs: check-release
+    if: |
+      always() &&
+      (needs.check-release.result == 'skipped' || needs.check-release.outputs.is-release != 'true')
+    uses: ./.github/workflows/build.yml
