@@ -18,7 +18,8 @@
     "openace": "./bin/cli.mjs"
   },
   "files": [
-    "bin/"
+    "bin/",
+    "README.md"
   ],
   "engines": {
     "node": ">=18"
