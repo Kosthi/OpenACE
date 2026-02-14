@@ -16,6 +16,17 @@ logger = logging.getLogger(__name__)
 _TEST_MARKERS = {"test", "tests", "test_", "_test", "spec", "specs", "__tests__"}
 
 
+# Symbol kinds that are more specific and actionable for search.
+_SPECIFIC_KINDS = {"function", "method"}
+
+# Generic dunder methods that provide less context than named methods.
+_GENERIC_NAMES = {"__call__", "__init__", "__new__", "__enter__", "__exit__"}
+
+# Low-value symbol kinds that should be demoted in search ranking.
+# These rarely answer "how does X work?" questions on their own.
+_LOW_VALUE_KINDS = {"constant", "variable", "module"}
+
+
 def _is_test_file(file_path: str) -> bool:
     """Heuristic: return True if the file path looks like a test file."""
     parts = file_path.replace("\\", "/").lower().split("/")
@@ -244,21 +255,79 @@ class Engine:
                         type(e).__name__,
                     )
 
-            # Stage 3: file-level dedup — keep highest-scoring symbol per file,
-            # preferring source files over test files for diverse results.
+            # Stage 3: file-level dedup — keep best symbol per file.
+            # Prefer methods/functions over classes/modules/constants since
+            # they are more specific and actionable for understanding code.
             if dedupe_by_file:
-                seen_files: set[str] = set()
+                best_per_file: dict[str, SearchResult] = {}
+                for r in results:
+                    prev = best_per_file.get(r.file_path)
+                    if prev is None:
+                        best_per_file[r.file_path] = r
+                    elif r.kind in _SPECIFIC_KINDS and prev.kind not in _SPECIFIC_KINDS:
+                        # Replace generic symbol with a more specific one
+                        best_per_file[r.file_path] = r
+                    elif (
+                        r.kind in _SPECIFIC_KINDS
+                        and prev.name in _GENERIC_NAMES
+                        and r.name not in _GENERIC_NAMES
+                    ):
+                        # Prefer named methods over dunder methods
+                        best_per_file[r.file_path] = r
+
+                # Separate into tiers:
+                #   1. source files (direct + graph-expanded, sorted together)
+                #   2. test files
+                #   3. low-value kinds (constants, variables, modules)
+                # Graph-only results get a mild score penalty so direct
+                # matches rank higher, but they stay in the main tier
+                # to preserve domain breadth.
+                _GRAPH_ONLY = {"graph"}
                 source_results: list[SearchResult] = []
                 test_results: list[SearchResult] = []
-                for r in results:
-                    if r.file_path not in seen_files:
-                        seen_files.add(r.file_path)
-                        if _is_test_file(r.file_path):
-                            test_results.append(r)
-                        else:
-                            source_results.append(r)
-                # Interleave: fill with source files first, then test files
-                results = source_results + test_results
+                lowval_results: list[SearchResult] = []
+                for r in best_per_file.values():
+                    if r.kind in _LOW_VALUE_KINDS:
+                        lowval_results.append(r)
+                    elif _is_test_file(r.file_path):
+                        test_results.append(r)
+                    else:
+                        source_results.append(r)
+                # Sort key: prefer rerank_score (from reranker) over
+                # the raw RRF score so reranker judgements are respected.
+                # Graph-only results get a 30% penalty to rank below
+                # direct matches at similar scores.
+                def _sort_key(r: SearchResult) -> float:
+                    base = r.rerank_score if r.rerank_score is not None else r.score
+                    if set(r.match_signals) == _GRAPH_ONLY:
+                        base *= 0.7
+                    return base
+
+                source_results.sort(key=_sort_key, reverse=True)
+                test_results.sort(key=_sort_key, reverse=True)
+                lowval_results.sort(key=_sort_key, reverse=True)
+                results = (
+                    source_results
+                    + test_results
+                    + lowval_results
+                )
+
+            # Stage 4: score-gap cutoff — detect a significant score
+            # drop between consecutive results and cut there.  This
+            # trims the tail of weakly-matching noise.
+            if len(results) > 3:
+                def _eff_score(r: SearchResult) -> float:
+                    return r.rerank_score if r.rerank_score is not None else r.score
+
+                cut_idx = len(results)
+                for idx in range(2, len(results)):
+                    prev = _eff_score(results[idx - 1])
+                    cur = _eff_score(results[idx])
+                    if prev > 0 and cur / prev < 0.6:
+                        cut_idx = idx
+                        break
+                # Never cut below 3 results — keep some breadth.
+                results = results[:max(cut_idx, 3)]
 
             return results[:limit]
         except OpenACEError:
@@ -300,8 +369,10 @@ class Engine:
     def embed_all(self) -> int:
         """Compute and store embeddings for all indexed symbols.
 
-        Iterates all symbols in batches, computes embeddings via the
-        configured provider, and stores vectors in the index.
+        Uses adaptive concurrent embedding: multiple batches are sent
+        in parallel via a ThreadPoolExecutor with AIMD-based concurrency
+        control.  Batches are submitted dynamically (no pre-computed
+        count), so this is safe during incremental indexing.
 
         Returns:
             Number of symbols embedded.
@@ -309,47 +380,15 @@ class Engine:
         if self._embedding_provider is None:
             raise OpenACEError("no embedding provider configured")
 
-        batch_size = 100
-        offset = 0
-        total_embedded = 0
-
-        while True:
-            symbols = self._core.list_symbols_for_embedding(batch_size, offset)
-            if not symbols:
-                break
-
-            # Build text for embedding: qualified_name + signature + doc_comment + body_text
-            texts = []
-            ids = []
-            for sym in symbols:
-                parts = [sym.qualified_name]
-                if sym.signature:
-                    parts.append(sym.signature)
-                if sym.doc_comment:
-                    parts.append(sym.doc_comment)
-                if sym.body_text:
-                    parts.append(sym.body_text[:2048])
-                texts.append(" ".join(parts))
-                ids.append(sym.id)
-
-            # Compute embeddings
-            vectors = self._embedding_provider.embed(texts)
-            vector_lists = [v.tolist() for v in vectors]
-
-            # Store in vector index
-            self._core.add_vectors(ids, vector_lists)
-
-            total_embedded += len(symbols)
-            offset += batch_size
-
-        self._core.flush()
-        return total_embedded
+        return self._concurrent_embed(self._embed_batch)
 
     def embed_all_chunks(self) -> int:
         """Compute and store embeddings for all indexed chunks.
 
-        Iterates all chunks in batches, computes embeddings via the
-        configured provider, and stores vectors in the index.
+        Uses adaptive concurrent embedding: multiple batches are sent
+        in parallel via a ThreadPoolExecutor with AIMD-based concurrency
+        control.  Batches are submitted dynamically (no pre-computed
+        count), so this is safe during incremental indexing.
 
         Returns:
             Number of chunks embedded.
@@ -357,29 +396,118 @@ class Engine:
         if self._embedding_provider is None:
             raise OpenACEError("no embedding provider configured")
 
+        return self._concurrent_embed(self._embed_chunk_batch)
+
+    def _embed_batch(self, offset: int, limit: int) -> int:
+        """Embed a single batch of symbols.
+
+        Returns the number of symbols embedded in this batch.
+        """
+        symbols = self._core.list_symbols_for_embedding(limit, offset)
+        if not symbols:
+            return 0
+
+        texts = []
+        ids = []
+        for sym in symbols:
+            parts = [sym.qualified_name]
+            if sym.signature:
+                parts.append(sym.signature)
+            if sym.doc_comment:
+                parts.append(sym.doc_comment)
+            if sym.body_text:
+                parts.append(sym.body_text[:32768])
+            texts.append(" ".join(parts))
+            ids.append(sym.id)
+
+        vectors = self._embedding_provider.embed(texts)
+        vector_lists = [v.tolist() for v in vectors]
+        self._core.add_vectors(ids, vector_lists)
+        return len(symbols)
+
+    def _embed_chunk_batch(self, offset: int, limit: int) -> int:
+        """Embed a single batch of chunks.
+
+        Returns the number of chunks embedded in this batch.
+        """
+        chunks = self._core.list_chunks_for_embedding(limit, offset)
+        if not chunks:
+            return 0
+
+        texts = []
+        ids = []
+        for chunk in chunks:
+            text = f"file: {chunk.file_path}\ncontext: {chunk.context_path}\n{chunk.content[:32768]}"
+            texts.append(text)
+            ids.append(chunk.id)
+
+        vectors = self._embedding_provider.embed(texts)
+        vector_lists = [v.tolist() for v in vectors]
+        self._core.add_vectors(ids, vector_lists)
+        return len(chunks)
+
+    def _concurrent_embed(
+        self,
+        batch_fn,
+    ) -> int:
+        """Run embedding batches concurrently with adaptive concurrency.
+
+        Batches are submitted dynamically with increasing offsets.
+        When a batch returns 0 items, no further batches are submitted.
+        This makes embedding safe during incremental indexing — no
+        pre-computed count that could go stale.
+
+        Args:
+            batch_fn: Callable(offset, limit) -> int that embeds one batch.
+
+        Returns:
+            Total number of items embedded.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from openace.embedding.adaptive import make_strategy
+
+        strategy = make_strategy(self._embedding_provider)
         batch_size = 100
-        offset = 0
         total_embedded = 0
+        failed = 0
+        next_offset = 0
+        exhausted = False
 
-        while True:
-            chunks = self._core.list_chunks_for_embedding(batch_size, offset)
-            if not chunks:
-                break
+        with ThreadPoolExecutor(max_workers=strategy.max_concurrency) as pool:
+            futures: dict = {}
 
-            texts = []
-            ids = []
-            for chunk in chunks:
-                text = f"file: {chunk.file_path}\ncontext: {chunk.context_path}\n{chunk.content[:2048]}"
-                texts.append(text)
-                ids.append(chunk.id)
+            # Initial fill
+            for _ in range(strategy.current_concurrency()):
+                fut = pool.submit(batch_fn, next_offset, batch_size)
+                futures[fut] = next_offset
+                next_offset += batch_size
 
-            vectors = self._embedding_provider.embed(texts)
-            vector_lists = [v.tolist() for v in vectors]
+            while futures:
+                done = next(as_completed(futures))
+                offset = futures.pop(done)
 
-            self._core.add_vectors(ids, vector_lists)
+                try:
+                    count = done.result()
+                    total_embedded += count
+                    strategy.record(True)
+                    if count == 0:
+                        exhausted = True
+                except Exception:
+                    failed += 1
+                    strategy.record(False)
+                    logger.warning(
+                        "Embedding batch at offset %d failed", offset, exc_info=True,
+                    )
 
-            total_embedded += len(chunks)
-            offset += batch_size
+                # Refill up to current concurrency
+                while not exhausted and len(futures) < strategy.current_concurrency():
+                    fut = pool.submit(batch_fn, next_offset, batch_size)
+                    futures[fut] = next_offset
+                    next_offset += batch_size
+
+        if failed:
+            logger.warning("Embedding completed with %d failed batches", failed)
 
         self._core.flush()
         return total_embedded
