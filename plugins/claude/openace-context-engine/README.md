@@ -1,12 +1,12 @@
 # OpenACE Context Engine Plugin for Claude Code
 
-Bring full codebase context into your AI workflows. OpenACE is an AI-native code intelligence engine that delivers semantic code search, symbol lookup, and file outline capabilities across large codebases via MCP. Use it to find code locations, understand implementations, and plan changes with precision. Multi-signal retrieval (BM25 + vector search + exact match + graph expansion) with RRF fusion ensures high-quality recall across Python, TypeScript, JavaScript, Rust, Go, and Java.
+Bring full codebase context into your AI workflows. OpenACE is an AI-native Contextual Code Engine that delivers semantic code search, symbol lookup, and file outline capabilities across large codebases via MCP. Use it to find code locations, understand implementations, and plan changes with precision. Multi-signal retrieval (BM25 + vector search + exact match + graph expansion) with RRF fusion ensures high-quality recall across Python, TypeScript, JavaScript, Rust, Go, and Java.
 
 ## What's Included
 
 This plugin provides:
 
-- **MCP Server** - Connects Claude Code to OpenACE's code intelligence engine
+- **MCP Server** - Connects Claude Code to OpenACE's Contextual Code Engine
 - **Skills** - Auto-triggers codebase retrieval when you ask about your code
 - **Agents** - A dedicated `context-expert` agent for focused code localization
 
@@ -35,7 +35,7 @@ claude --plugin-dir plugins/claude/openace-context-engine
 Add OpenACE as an MCP server in Codex CLI:
 
 ```bash
-codex mcp add openace -- uvx openace[mcp] serve .
+codex mcp add openace -- uvx openace serve .
 ```
 
 **With embedding enabled:**
@@ -44,7 +44,7 @@ codex mcp add openace -- uvx openace[mcp] serve .
 codex mcp add openace \
   --env OPENACE_EMBEDDING=siliconflow \
   --env OPENAI_API_KEY=$OPENAI_API_KEY \
-  -- uvx openace[mcp] serve .
+  -- uvx openace serve .
 ```
 
 **Or configure via `config.toml`:**
@@ -53,7 +53,7 @@ codex mcp add openace \
 [mcp_servers.openace]
 type = "stdio"
 command = "uvx"
-args = ["openace[mcp]", "serve", "."]
+args = ["openace", "serve", "."]
 
 [mcp_servers.openace.env]
 OPENACE_EMBEDDING = "none"

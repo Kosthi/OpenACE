@@ -1,6 +1,6 @@
 {
   "name": "openace-context-engine",
-  "description": "AI-native code intelligence engine. OpenACE delivers semantic code search, symbol lookup, and file outline capabilities across large codebases via MCP. Use it to find code locations, understand implementations, and plan changes with precision.",
+  "description": "AI-native Contextual Code Engine. OpenACE delivers semantic code search, symbol lookup, and file outline capabilities across large codebases via MCP. Use it to find code locations, understand implementations, and plan changes with precision.",
   "author": {
     "name": "OpenACE"
   }

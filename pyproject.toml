@@ -5,20 +5,28 @@ build-backend = "maturin"
 [project]
 name = "openace"
 version = "0.1.0"
-description = "AI-native code intelligence engine"
+description = "AI-native Contextual Code Engine"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+readme = "README.md"
+keywords = ["code-intelligence", "code-search", "mcp", "tree-sitter"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
     "click>=8.0",
+    "mcp>=1.0",
+    "openai>=1.0",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
-onnx = ["onnxruntime>=1.16", "tokenizers>=0.15", "numpy>=1.24"]
-openai = ["openai>=1.0"]
-mcp = ["mcp>=1.0"]
-rerank-local = ["onnxruntime>=1.16", "tokenizers>=0.15", "numpy>=1.24", "huggingface_hub>=0.20"]
+onnx = ["onnxruntime>=1.16", "tokenizers>=0.15"]
+rerank-local = ["onnxruntime>=1.16", "tokenizers>=0.15", "huggingface_hub>=0.20"]
 rerank-cohere = ["cohere>=5.0"]
-rerank-openai = ["openai>=1.0"]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
 
 [project.scripts]

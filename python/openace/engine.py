@@ -99,7 +99,7 @@ def _convert_index_report(py_report) -> IndexReport:
 
 
 class Engine:
-    """OpenACE code intelligence engine.
+    """OpenACE Contextual Code Engine.
 
     High-level interface combining Rust-powered indexing/search with
     optional Python embedding providers.

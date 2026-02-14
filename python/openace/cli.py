@@ -101,7 +101,7 @@ def _build_engine_kwargs(
 @click.group()
 @click.version_option(package_name="openace")
 def main():
-    """OpenACE - AI-native code intelligence engine."""
+    """OpenACE - AI-native Contextual Code Engine."""
     pass
 
 
