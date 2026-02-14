@@ -3,8 +3,22 @@ name: CI
 on:
   push:
     branches: [master]
+    paths-ignore:
+      - "**.md"
+      - "CLAUDE.md"
+      - "**/CLAUDE.md"
+      - "LICENSE"
+      - ".gitignore"
+      - "docs/**"
   pull_request:
     branches: [master]
+    paths-ignore:
+      - "**.md"
+      - "CLAUDE.md"
+      - "**/CLAUDE.md"
+      - "LICENSE"
+      - ".gitignore"
+      - "docs/**"
 
 permissions:
   contents: read
