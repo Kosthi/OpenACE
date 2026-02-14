@@ -194,11 +194,11 @@ Python, TypeScript, JavaScript, Rust, Go, Java.
 Requires Rust >= 1.85.0 and Python >= 3.10.
 
 ```bash
-git clone https://github.com/anthropics/openace.git
-cd openace
+git clone https://github.com/Kosthi/OpenACE.git
+cd OpenACE
 pip install maturin
 maturin develop --release
-pip install -e ".[mcp,openai]"
+pip install -e ".[dev]"
 ```
 
 ## License
