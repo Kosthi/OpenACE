@@ -1,6 +1,6 @@
 {
   "name": "openace",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "AI-native Contextual Code Engine — semantic code search via MCP",
   "license": "MIT",
   "repository": {
