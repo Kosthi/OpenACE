@@ -100,7 +100,7 @@ OpenACE supports any OpenAI-compatible embedding/reranking API. Configure via CL
 
 | Name | Model | Requires |
 |------|-------|----------|
-| `siliconflow` | BAAI/bge-m3 (1024-dim) | `openace[openai]` + API key |
+| `siliconflow` | Qwen/Qwen3-Embedding-8B (1024-dim) | `openace[openai]` + API key |
 | `openai` | text-embedding-3-small | `openace[openai]` + API key |
 | `local` | all-MiniLM-L6-v2 (384-dim) | `openace[onnx]` |
 | `none` | BM25 only, no vector search | (default) |
@@ -110,7 +110,7 @@ OpenACE supports any OpenAI-compatible embedding/reranking API. Configure via CL
 | Name | Backend | Requires |
 |------|---------|----------|
 | `auto` | Matches embedding provider | (default) |
-| `siliconflow` | BAAI/bge-reranker-v2-m3 | `openace[openai]` + API key |
+| `siliconflow` | Qwen/Qwen3-Reranker-8B | `openace[openai]` + API key |
 | `cohere` | Cohere Rerank | `openace[rerank-cohere]` + API key |
 | `cross_encoder` | Local cross-encoder model | `openace[rerank-local]` |
 | `rule_based` | Heuristic (no API needed) | (built-in) |
