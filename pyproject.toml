@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "openace"
-version = "0.1.3"
+version = "0.1.4"
 description = "AI-native Contextual Code Engine"
 requires-python = ">=3.10"
 license = { text = "MIT" }
