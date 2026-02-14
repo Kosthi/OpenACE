@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       upload-artifacts:
-        description: "Upload wheel and sdist artifacts for publishing"
+        description: "Upload wheel artifacts for publishing"
         required: false
         default: false
         type: boolean
@@ -81,19 +81,4 @@ jobs:
         if: inputs.upload-artifacts
         with:
           name: wheels-${{ matrix.target }}
-          path: dist/
-
-  sdist:
-    if: inputs.upload-artifacts
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build sdist
-        uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sdist
           path: dist/
