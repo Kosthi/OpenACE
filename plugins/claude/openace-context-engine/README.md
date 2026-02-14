@@ -26,7 +26,7 @@ claude --plugin-dir plugins/claude/openace-context-engine
 
 ```bash
 export OPENACE_EMBEDDING=siliconflow
-export OPENAI_API_KEY=your-key-here
+export OPENACE_EMBEDDING_API_KEY=your-key-here
 claude --plugin-dir plugins/claude/openace-context-engine
 ```
 
@@ -43,7 +43,7 @@ codex mcp add openace -- uvx openace serve .
 ```bash
 codex mcp add openace \
   --env OPENACE_EMBEDDING=siliconflow \
-  --env OPENAI_API_KEY=$OPENAI_API_KEY \
+  --env OPENACE_EMBEDDING_API_KEY=$OPENACE_EMBEDDING_API_KEY \
   -- uvx openace serve .
 ```
 
@@ -113,8 +113,8 @@ Key features:
 |---|---|---|
 | `OPENACE_EMBEDDING` | Embedding provider for vector search | `none` (default), `local`, `openai`, `siliconflow` |
 | `OPENACE_RERANKER` | Reranker backend for result reranking | `auto` (default), `rule_based`, `cross_encoder`, `cohere`, `openai`, `siliconflow`, `none` |
-| `OPENAI_API_KEY` | API key for OpenAI or SiliconFlow backends | Required when using `openai` or `siliconflow` embedding |
-| `COHERE_API_KEY` | API key for Cohere reranker | Required when using `cohere` reranker |
+| `OPENACE_EMBEDDING_API_KEY` | API key for embedding provider (OpenAI, SiliconFlow) | Required when using `openai` or `siliconflow` embedding |
+| `OPENACE_RERANKER_API_KEY` | API key for reranker provider | Required when using `cohere` or `siliconflow` reranker |
 
 ### Auto-Reranker Mapping
 
@@ -179,8 +179,8 @@ For Claude Code, modify `.mcp.json` in the plugin directory to use `openace` dir
       "env": {
         "OPENACE_EMBEDDING": "${OPENACE_EMBEDDING}",
         "OPENACE_RERANKER": "${OPENACE_RERANKER}",
-        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-        "COHERE_API_KEY": "${COHERE_API_KEY}"
+        "OPENACE_EMBEDDING_API_KEY": "${OPENACE_EMBEDDING_API_KEY}",
+        "OPENACE_RERANKER_API_KEY": "${OPENACE_RERANKER_API_KEY}"
       }
     }
   }
