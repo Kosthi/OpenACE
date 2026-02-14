@@ -40,7 +40,7 @@ impl SearchQuery {
             bm25_pool_size: 100,
             exact_match_pool_size: 50,
             query_vector: None,
-            vector_pool_size: 50,
+            vector_pool_size: 100,
             enable_chunk_search: false,
             chunk_bm25_pool_size: 100,
         }
@@ -699,7 +699,7 @@ mod tests {
         assert_eq!(q.bm25_pool_size, 100);
         assert_eq!(q.exact_match_pool_size, 50);
         assert!(q.query_vector.is_none());
-        assert_eq!(q.vector_pool_size, 50);
+        assert_eq!(q.vector_pool_size, 100);
         assert!(!q.enable_chunk_search);
         assert_eq!(q.chunk_bm25_pool_size, 100);
     }

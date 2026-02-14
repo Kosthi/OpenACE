@@ -26,6 +26,9 @@ _GENERIC_NAMES = {"__call__", "__init__", "__new__", "__enter__", "__exit__"}
 # These rarely answer "how does X work?" questions on their own.
 _LOW_VALUE_KINDS = {"constant", "variable", "module"}
 
+# Module init files are usually re-exports, rarely implementation.
+_INIT_FILE = "__init__.py"
+
 
 def _is_test_file(file_path: str) -> bool:
     """Heuristic: return True if the file path looks like a test file."""
@@ -289,6 +292,8 @@ class Engine:
                 for r in best_per_file.values():
                     if r.kind in _LOW_VALUE_KINDS:
                         lowval_results.append(r)
+                    elif r.file_path.endswith(_INIT_FILE):
+                        lowval_results.append(r)
                     elif _is_test_file(r.file_path):
                         test_results.append(r)
                     else:
@@ -301,6 +306,8 @@ class Engine:
                     base = r.rerank_score if r.rerank_score is not None else r.score
                     if set(r.match_signals) == _GRAPH_ONLY:
                         base *= 0.7
+                    elif len(r.match_signals) == 1:
+                        base *= 0.85  # demote single-signal noise
                     return base
 
                 source_results.sort(key=_sort_key, reverse=True)
