@@ -1,0 +1,26 @@
+{
+  "name": "openace",
+  "version": "0.1.0",
+  "description": "AI-native Contextual Code Engine — semantic code search via MCP",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Kosthi/OpenACE"
+  },
+  "keywords": [
+    "mcp",
+    "code-search",
+    "code-intelligence",
+    "tree-sitter",
+    "claude-code"
+  ],
+  "bin": {
+    "openace": "./bin/cli.mjs"
+  },
+  "files": [
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
