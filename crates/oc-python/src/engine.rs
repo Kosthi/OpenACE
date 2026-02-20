@@ -9,7 +9,7 @@ use oc_indexer::IndexConfig;
 use oc_retrieval::engine::{RetrievalEngine, SearchQuery};
 use oc_storage::manager::StorageManager;
 
-use crate::types::{PyChunkData, PyIndexReport, PySearchResult, PySymbol};
+use crate::types::{PyChunkData, PyFileInfo, PyIndexReport, PySearchResult, PySummaryChunk, PySymbol};
 
 /// Parse a 32-hex-char string into a SymbolId.
 fn parse_symbol_id(hex: &str) -> PyResult<SymbolId> {
@@ -364,6 +364,146 @@ impl EngineBinding {
                     content: c.content,
                 })
                 .collect())
+        })
+    }
+
+    /// List all indexed files with metadata for summary generation.
+    fn list_indexed_files(&self, py: Python<'_>) -> PyResult<Vec<PyFileInfo>> {
+        let inner = Arc::clone(&self.inner);
+
+        py.allow_threads(move || {
+            let locked = lock_inner(&inner)?;
+            let mgr = locked
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("storage unavailable (indexing in progress)"))?;
+
+            let files = mgr.graph().list_files().map_err(|e| {
+                PyRuntimeError::new_err(format!("list_files failed: {e}"))
+            })?;
+
+            Ok(files
+                .into_iter()
+                .map(|f| PyFileInfo {
+                    path: f.path,
+                    language: f.language.name().to_string(),
+                    symbol_count: f.symbol_count,
+                })
+                .collect())
+        })
+    }
+
+    /// Insert summary chunks for files.
+    ///
+    /// For each chunk, deletes any existing summary for the file, then inserts
+    /// the new summary into SQLite and Tantivy.
+    fn upsert_summary_chunks(
+        &self,
+        py: Python<'_>,
+        chunks: Vec<PySummaryChunk>,
+    ) -> PyResult<usize> {
+        let repo_id = self.repo_id.clone();
+        let inner = Arc::clone(&self.inner);
+
+        py.allow_threads(move || {
+            let mut locked = lock_inner(&inner)?;
+            let mgr = locked
+                .as_mut()
+                .ok_or_else(|| PyRuntimeError::new_err("storage unavailable (indexing in progress)"))?;
+
+            let mut count = 0usize;
+            for sc in &chunks {
+                let lang = parse_language(&sc.language).unwrap_or(Language::Python);
+
+                // Delete old summary chunks for this file (SQLite + Tantivy)
+                let old_chunks = mgr.graph().get_chunks_by_file(&sc.file_path).map_err(|e| {
+                    PyRuntimeError::new_err(format!("get_chunks_by_file failed: {e}"))
+                })?;
+                for old in &old_chunks {
+                    if old.context_path == "__file_summary__" {
+                        mgr.fulltext_mut().delete_chunk_document(old.id).map_err(|e| {
+                            PyRuntimeError::new_err(format!("delete_chunk_document failed: {e}"))
+                        })?;
+                    }
+                }
+                mgr.graph_mut().delete_summary_chunks_by_file(&sc.file_path).map_err(|e| {
+                    PyRuntimeError::new_err(format!("delete_summary_chunks failed: {e}"))
+                })?;
+
+                // Build the CodeChunk
+                let content_hash = oc_core::CodeChunk::compute_content_hash(sc.content.as_bytes());
+                let chunk = oc_core::CodeChunk {
+                    id: oc_core::ChunkId::generate(&repo_id, &sc.file_path, 0, 0),
+                    language: lang,
+                    file_path: sc.file_path.clone().into(),
+                    byte_range: 0..0,
+                    line_range: 0..0,
+                    chunk_index: 0,
+                    total_chunks: 1,
+                    context_path: "__file_summary__".to_string(),
+                    content: sc.content.clone(),
+                    content_hash,
+                };
+
+                // Insert into SQLite
+                mgr.graph_mut().insert_chunks(&[chunk.clone()], 1000).map_err(|e| {
+                    PyRuntimeError::new_err(format!("insert_chunks failed: {e}"))
+                })?;
+
+                // Insert into Tantivy
+                mgr.fulltext_mut().add_chunk_document(&chunk).map_err(|e| {
+                    PyRuntimeError::new_err(format!("add_chunk_document failed: {e}"))
+                })?;
+
+                count += 1;
+            }
+
+            // Commit Tantivy
+            mgr.fulltext_mut().commit().map_err(|e| {
+                PyRuntimeError::new_err(format!("fulltext commit failed: {e}"))
+            })?;
+
+            Ok(count)
+        })
+    }
+
+    /// Delete summary chunks for given file paths.
+    fn delete_summary_chunks(
+        &self,
+        py: Python<'_>,
+        file_paths: Vec<String>,
+    ) -> PyResult<usize> {
+        let inner = Arc::clone(&self.inner);
+
+        py.allow_threads(move || {
+            let mut locked = lock_inner(&inner)?;
+            let mgr = locked
+                .as_mut()
+                .ok_or_else(|| PyRuntimeError::new_err("storage unavailable (indexing in progress)"))?;
+
+            let mut total = 0usize;
+            for fp in &file_paths {
+                // Delete from Tantivy first
+                let old_chunks = mgr.graph().get_chunks_by_file(fp).map_err(|e| {
+                    PyRuntimeError::new_err(format!("get_chunks_by_file failed: {e}"))
+                })?;
+                for old in &old_chunks {
+                    if old.context_path == "__file_summary__" {
+                        mgr.fulltext_mut().delete_chunk_document(old.id).map_err(|e| {
+                            PyRuntimeError::new_err(format!("delete_chunk_document failed: {e}"))
+                        })?;
+                    }
+                }
+                let deleted = mgr.graph_mut().delete_summary_chunks_by_file(fp).map_err(|e| {
+                    PyRuntimeError::new_err(format!("delete_summary_chunks failed: {e}"))
+                })?;
+                total += deleted;
+            }
+
+            mgr.fulltext_mut().commit().map_err(|e| {
+                PyRuntimeError::new_err(format!("fulltext commit failed: {e}"))
+            })?;
+
+            Ok(total)
         })
     }
 

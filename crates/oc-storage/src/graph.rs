@@ -492,6 +492,15 @@ impl GraphStore {
         Ok(affected)
     }
 
+    /// Delete summary chunks (context_path = '__file_summary__') for a given file path.
+    pub fn delete_summary_chunks_by_file(&mut self, file_path: &str) -> Result<usize, StorageError> {
+        let affected = self.conn.execute(
+            "DELETE FROM chunks WHERE file_path = ?1 AND context_path = '__file_summary__'",
+            params![file_path],
+        )?;
+        Ok(affected)
+    }
+
     /// Count total number of chunks in the store.
     pub fn count_chunks(&self) -> Result<usize, StorageError> {
         let count: i64 = self.conn.query_row(
@@ -569,6 +578,20 @@ impl GraphStore {
     pub fn delete_file(&mut self, path: &str) -> Result<bool, StorageError> {
         let affected = self.conn.execute("DELETE FROM files WHERE path = ?1", params![path])?;
         Ok(affected > 0)
+    }
+
+    /// List all indexed files with metadata.
+    pub fn list_files(&self) -> Result<Vec<FileMetadata>, StorageError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT path, content_hash, language, size_bytes, symbol_count, \
+             last_indexed, last_modified FROM files ORDER BY path",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next()? {
+            results.push(row_to_file_metadata(row)?);
+        }
+        Ok(results)
     }
 
     // -- Repository metadata --

@@ -258,6 +258,59 @@ impl From<CodeRelation> for PyRelation {
     }
 }
 
+/// Python-compatible file info for summary generation.
+#[pyclass(frozen)]
+#[derive(Clone)]
+pub struct PyFileInfo {
+    #[pyo3(get)]
+    pub path: String,
+    #[pyo3(get)]
+    pub language: String,
+    #[pyo3(get)]
+    pub symbol_count: u32,
+}
+
+#[pymethods]
+impl PyFileInfo {
+    fn __repr__(&self) -> String {
+        format!(
+            "FileInfo(path={:?}, language={:?}, symbols={})",
+            self.path, self.language, self.symbol_count
+        )
+    }
+}
+
+/// Python-compatible summary chunk input for upsert.
+#[pyclass(frozen)]
+#[derive(Clone)]
+pub struct PySummaryChunk {
+    #[pyo3(get)]
+    pub file_path: String,
+    #[pyo3(get)]
+    pub language: String,
+    #[pyo3(get)]
+    pub content: String,
+}
+
+#[pymethods]
+impl PySummaryChunk {
+    #[new]
+    fn new(file_path: String, language: String, content: String) -> Self {
+        Self {
+            file_path,
+            language,
+            content,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SummaryChunk(file={:?}, language={:?})",
+            self.file_path, self.language
+        )
+    }
+}
+
 fn kind_to_string(kind: SymbolKind) -> String {
     match kind {
         SymbolKind::Function => "function",

@@ -122,8 +122,10 @@ def main():
               help="Reranker backend (default: auto, matches embedding).")
 @click.option("--chunk/--no-chunk", default=True,
               help="Enable AST chunk-level indexing (default: on).")
+@click.option("--summary/--no-summary", default=True,
+              help="Enable file-level summary indexing (default: on).")
 @_provider_options
-def index(path: str, embedding: str, reranker: str, chunk: bool,
+def index(path: str, embedding: str, reranker: str, chunk: bool, summary: bool,
           embedding_base_url, embedding_api_key, embedding_dim,
           reranker_base_url, reranker_api_key):
     """Index a project directory."""
@@ -141,7 +143,7 @@ def index(path: str, embedding: str, reranker: str, chunk: bool,
         reranker_base_url=reranker_base_url,
         reranker_api_key=reranker_api_key,
     )
-    engine = Engine(project_path, chunk_enabled=chunk, **engine_kwargs)
+    engine = Engine(project_path, chunk_enabled=chunk, summary_enabled=summary, **engine_kwargs)
     report = engine.index()
 
     click.echo(f"\nIndexing complete:")
@@ -171,12 +173,14 @@ def index(path: str, embedding: str, reranker: str, chunk: bool,
               help="Signal weighting backend (default: none).")
 @click.option("--chunk/--no-chunk", default=True,
               help="Enable AST chunk-level search (default: on).")
+@click.option("--summary/--no-summary", default=True,
+              help="Enable file-level summary search (default: on).")
 @click.option("--limit", "-n", default=10, help="Max results.")
 @click.option("--language", "-l", default=None, help="Language filter.")
 @click.option("--file-path", "-f", default=None, help="File path prefix filter.")
 @_provider_options
 def search(query: str, path: str, embedding: str, reranker: str, expansion: str,
-           weighting: str, chunk: bool, limit: int, language: str, file_path: str,
+           weighting: str, chunk: bool, summary: bool, limit: int, language: str, file_path: str,
            embedding_base_url, embedding_api_key, embedding_dim,
            reranker_base_url, reranker_api_key):
     """Search for symbols in an indexed project."""
@@ -192,7 +196,7 @@ def search(query: str, path: str, embedding: str, reranker: str, expansion: str,
         reranker_base_url=reranker_base_url,
         reranker_api_key=reranker_api_key,
     )
-    engine = Engine(project_path, chunk_enabled=chunk, **engine_kwargs)
+    engine = Engine(project_path, chunk_enabled=chunk, summary_enabled=summary, **engine_kwargs)
     results = engine.search(query, limit=limit, language=language, file_path=file_path)
 
     if not results:
@@ -236,9 +240,11 @@ def search(query: str, path: str, embedding: str, reranker: str, expansion: str,
               help="Signal weighting backend (default: none).")
 @click.option("--chunk/--no-chunk", default=True,
               help="Enable AST chunk-level indexing and search (default: on).")
+@click.option("--summary/--no-summary", default=True,
+              help="Enable file-level summary indexing (default: on).")
 @_provider_options
 def serve(path: str, embedding: str, reranker: str, expansion: str, weighting: str,
-          chunk: bool,
+          chunk: bool, summary: bool,
           embedding_base_url, embedding_api_key, embedding_dim,
           reranker_base_url, reranker_api_key):
     """Start MCP server on stdio."""
@@ -266,7 +272,7 @@ def serve(path: str, embedding: str, reranker: str, expansion: str, weighting: s
             reranker_base_url=reranker_base_url,
             reranker_api_key=reranker_api_key,
         )
-        engine = Engine(project_path, chunk_enabled=chunk, **engine_kwargs)
+        engine = Engine(project_path, chunk_enabled=chunk, summary_enabled=summary, **engine_kwargs)
     except click.ClickException:
         raise
     except Exception as e:

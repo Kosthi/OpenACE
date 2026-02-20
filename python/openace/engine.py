@@ -123,6 +123,7 @@ class Engine:
         query_expander: Optional[QueryExpander] = None,
         signal_weighter: Optional[SignalWeighter] = None,
         chunk_enabled: bool = False,
+        summary_enabled: bool = False,
     ):
         """Initialize the engine.
 
@@ -136,6 +137,7 @@ class Engine:
             query_expander: Optional query expander for improved recall.
             signal_weighter: Optional signal weighter for adaptive RRF fusion.
             chunk_enabled: Enable AST chunk-level indexing and search.
+            summary_enabled: Enable file-level summary indexing.
         """
         from openace._openace import EngineBinding
 
@@ -147,6 +149,9 @@ class Engine:
         self._query_expander = query_expander
         self._signal_weighter = signal_weighter
         self._chunk_enabled = chunk_enabled
+        self._summary_enabled = summary_enabled
+        if summary_enabled:
+            self._chunk_enabled = True
         if reranker is not None and rerank_pool_size > 200:
             logger.warning(
                 "rerank_pool_size=%d exceeds Rust upper bound of 200, capped to 200",
@@ -177,6 +182,16 @@ class Engine:
         # Auto-embed if provider is set
         if self._embedding_provider is not None:
             self.embed_all()
+
+        # Generate file-level summaries
+        if self._summary_enabled:
+            try:
+                from openace.summary import RuleBasedSummaryGenerator, generate_file_summaries
+                generator = RuleBasedSummaryGenerator()
+                summary_count = generate_file_summaries(self._core, generator)
+                logger.info("Generated %d file summaries", summary_count)
+            except Exception as e:
+                logger.warning("Summary generation failed (%s): %s", type(e).__name__, e)
 
         return report
 
