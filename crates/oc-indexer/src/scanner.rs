@@ -32,6 +32,7 @@ pub struct ScanResult {
 ///
 /// Uses the `ignore` crate for .gitignore-aware walking.
 /// Applies additional filtering: vendor dirs, generated patterns, hidden dirs, symlinks.
+#[tracing::instrument(skip_all)]
 pub fn scan_files(project_root: &Path) -> ScanResult {
     let mut files = Vec::new();
     let mut total_entries = 0usize;
@@ -86,6 +87,8 @@ pub fn scan_files(project_root: &Path) -> ScanResult {
 
         files.push(rel);
     }
+
+    tracing::debug!(file_count = files.len(), "scan completed");
 
     ScanResult {
         files,

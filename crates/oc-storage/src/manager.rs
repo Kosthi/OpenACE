@@ -62,11 +62,13 @@ impl StorageManager {
     }
 
     /// Open or create with an explicit vector dimension.
+    #[tracing::instrument]
     pub fn open_with_dimension(
         project_root: &Path,
         vector_dimension: usize,
     ) -> Result<Self, StorageError> {
         let root = project_root.join(".openace");
+        tracing::info!(project_root = %project_root.display(), "opening storage");
 
         match Self::try_open(&root, vector_dimension) {
             Ok(mgr) => {
@@ -74,9 +76,11 @@ impl StorageManager {
                 Ok(mgr)
             }
             Err(e) if Self::should_purge(&e) => {
+                tracing::warn!(corruption_type = %e, "storage corruption detected, rebuilding");
                 Self::purge(&root)?;
                 let mgr = Self::try_open(&root, vector_dimension)?;
                 mgr.save_meta(vector_dimension);
+                tracing::info!("storage rebuilt successfully");
                 Ok(mgr)
             }
             Err(e) => Err(e),

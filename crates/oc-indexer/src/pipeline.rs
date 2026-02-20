@@ -4,6 +4,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use rayon::prelude::*;
+use tracing;
 
 use oc_core::{CodeChunk, CodeSymbol};
 use oc_parser::{chunk_file, is_binary, parse_file_with_tree, ParserRegistry};
@@ -35,12 +36,14 @@ enum FileOutcome {
 /// Pipeline: scan → filter → parallel parse (rayon) → sequential store → Tantivy index.
 ///
 /// Returns an `IndexReport` with statistics about the indexing run.
+#[tracing::instrument(skip(config))]
 pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, IndexerError> {
     let start = Instant::now();
 
     // 1. Scan for files
     let scan_result = scan_files(project_path);
     let total_files_scanned = scan_result.files.len();
+    tracing::info!(files = total_files_scanned, "index started");
 
     // 2. Open storage
     let mut storage = StorageManager::open_with_dimension(project_path, config.embedding_dim)?;
@@ -65,10 +68,12 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
     // 4. Parallel parse
     let chunk_enabled = config.chunk_enabled;
     let chunk_config = config.chunk_config.clone();
+    let parent_span = tracing::Span::current();
     let outcomes: Vec<FileOutcome> = scan_result
         .files
         .par_iter()
         .map(|rel_path| {
+            let _guard = tracing::debug_span!(parent: &parent_span, "parse_file", path = %rel_path.display()).entered();
             let rel_str = normalize_path(rel_path);
             let abs_path = project_path.join(rel_path);
 
@@ -293,8 +298,7 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
         // Index chunks into Tantivy fulltext
         for chunk in &all_chunks {
             if let Err(e) = storage.fulltext_mut().add_chunk_document(chunk) {
-                // Graceful degradation: log failure but don't block indexing
-                eprintln!("warning: chunk fulltext index failed: {e}");
+                tracing::warn!(error = %e, "chunk fulltext index failed");
             }
         }
     }
@@ -306,6 +310,13 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
     })?;
 
     let duration = start.elapsed();
+
+    tracing::info!(
+        files = files_indexed,
+        symbols = total_symbols,
+        duration_secs = %format!("{:.2}", duration.as_secs_f64()),
+        "index completed"
+    );
 
     Ok(IndexReport {
         total_files_scanned,

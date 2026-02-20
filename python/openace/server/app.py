@@ -6,9 +6,13 @@ import asyncio
 import sys
 from typing import Any
 
+import structlog
+
 from openace.engine import Engine, _is_test_file, _LOW_VALUE_KINDS
 from openace.exceptions import OpenACEError
 from openace.types import SearchResult
+
+logger = structlog.get_logger(__name__)
 
 
 _GRAPH_ONLY = {"graph"}
@@ -206,24 +210,23 @@ def create_server(engine: Engine, *, auto_index: bool = False):
             )
             if needs_index or needs_chunk_rebuild:
                 reason = "no index" if needs_index else "building chunks"
-                print(f"Indexing project ({reason})...", file=sys.stderr)
+                logger.info("indexing project", reason=reason)
                 report = await asyncio.to_thread(engine.index)
-                chunks_msg = f", {report.total_chunks} chunks" if report.total_chunks else ""
-                print(
-                    f"Indexed {report.files_indexed} files, "
-                    f"{report.total_symbols} symbols{chunks_msg} "
-                    f"in {report.duration_secs:.2f}s",
-                    file=sys.stderr,
+                logger.info(
+                    "indexing complete",
+                    files=report.files_indexed,
+                    symbols=report.total_symbols,
+                    chunks=report.total_chunks,
+                    duration_secs=f"{report.duration_secs:.2f}",
                 )
             else:
-                chunks_msg = f", {existing_chunks} chunks" if existing_chunks else ""
-                print(
-                    f"Index already exists ({existing_symbols} symbols{chunks_msg}), "
-                    f"skipping re-index.",
-                    file=sys.stderr,
+                logger.info(
+                    "index exists, skipping re-index",
+                    symbols=existing_symbols,
+                    chunks=existing_chunks,
                 )
         except Exception as exc:
-            print(f"Background indexing failed: {exc}", file=sys.stderr)
+            logger.error("background indexing failed", error=str(exc))
         finally:
             _index_ready.set()
 

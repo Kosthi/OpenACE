@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import logging
+import structlog
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from openace.types import Symbol
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # Maximum summary text size in characters.
 _MAX_SUMMARY_CHARS = 4096

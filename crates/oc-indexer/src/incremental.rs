@@ -94,6 +94,7 @@ pub struct IncrementalReport {
 /// SQLite is committed first; Tantivy updates happen only after SQLite succeeds.
 ///
 /// If `chunk_config` is Some, chunks will be re-indexed for the file.
+#[tracing::instrument(skip(storage, chunk_config))]
 pub fn update_file(
     project_path: &Path,
     rel_path: &str,
@@ -101,6 +102,7 @@ pub fn update_file(
     storage: &mut StorageManager,
     chunk_config: Option<&ChunkConfig>,
 ) -> Result<IncrementalReport, IndexerError> {
+    tracing::debug!(path = %rel_path, "updating file");
     let abs_path = project_path.join(rel_path);
 
     // Validate that the resolved path stays within the project root.
@@ -330,11 +332,13 @@ pub fn update_file(
 /// Handle a file deletion: remove all symbols, relations, chunks, Tantivy docs, and file metadata.
 ///
 /// Write ordering: SQLite first, then Tantivy.
+#[tracing::instrument(skip(storage))]
 pub fn delete_file(
     rel_path: &str,
     storage: &mut StorageManager,
     chunk_enabled: bool,
 ) -> Result<IncrementalReport, IndexerError> {
+    tracing::debug!(path = %rel_path, "deleting file");
     // Get all symbols for this file before deleting
     let old_symbols = storage.graph().get_symbols_by_file(rel_path)?;
     let removed_count = old_symbols.len();
@@ -375,6 +379,7 @@ pub fn delete_file(
 /// Process a batch of change events from the watcher.
 ///
 /// Each event is processed incrementally. Returns a report per file.
+#[tracing::instrument(skip(storage))]
 pub fn process_events(
     project_path: &Path,
     events: &[ChangeEvent],
@@ -382,6 +387,7 @@ pub fn process_events(
     storage: &mut StorageManager,
     chunk_config: Option<&ChunkConfig>,
 ) -> Vec<Result<IncrementalReport, IndexerError>> {
+    tracing::debug!(event_count = events.len(), "processing events");
     // Deduplicate events: keep only the latest event per path
     let mut latest: HashMap<String, &ChangeEvent> = HashMap::new();
     for event in events {

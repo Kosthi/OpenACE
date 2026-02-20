@@ -2,6 +2,11 @@
 
 __version__ = "0.1.5"
 
+from openace.logging import configure_logging
+
+# Initialize logging with environment defaults
+configure_logging()
+
 
 def __getattr__(name):
     """Lazy imports to avoid importing Rust extension at module load."""

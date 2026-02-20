@@ -451,6 +451,7 @@ impl FullTextStore {
     /// The query is tokenized with the code-aware tokenizer and matched against
     /// name, qualified_name, and content fields. Optional filters narrow results
     /// by file path and/or language.
+    #[tracing::instrument(skip(self), fields(result_count))]
     pub fn search_bm25(
         &self,
         query: &str,
@@ -522,6 +523,7 @@ impl FullTextStore {
             }
         }
 
+        tracing::Span::current().record("result_count", hits.len());
         Ok(hits)
     }
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import Optional
 
@@ -109,9 +110,26 @@ def _build_engine_kwargs(
 
 @click.group()
 @click.version_option(package_name="openace")
-def main():
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Enable verbose (debug) logging.")
+@click.option("--quiet", "-q", is_flag=True, default=False, help="Suppress all output except errors.")
+@click.pass_context
+def main(ctx, verbose, quiet):
     """OpenACE - AI-native Contextual Code Engine."""
-    pass
+    if verbose and quiet:
+        raise click.UsageError("Cannot use --verbose and --quiet together.")
+
+    if verbose:
+        level = "DEBUG"
+    elif quiet:
+        level = "ERROR"
+    else:
+        level = None  # use environment default
+
+    if level is not None:
+        os.environ["OPENACE_LOG_LEVEL"] = level
+
+    from openace.logging import configure_logging
+    configure_logging(level=level)
 
 
 @main.command()

@@ -10,6 +10,7 @@ description = "Multi-signal retrieval engine for OpenACE"
 oc-core.workspace = true
 oc-storage.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

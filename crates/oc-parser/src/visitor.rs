@@ -52,6 +52,7 @@ pub struct ParseOutputWithTree {
 /// This is the extended version of `parse_file()` that also returns the AST tree
 /// and source string, enabling downstream consumers (e.g., the chunker) to reuse
 /// the parse result without re-parsing.
+#[tracing::instrument(skip(content), fields(language, symbol_count))]
 pub fn parse_file_with_tree(
     repo_id: &str,
     file_path: &str,
@@ -62,6 +63,7 @@ pub fn parse_file_with_tree(
     check_file_size(file_path, content.len() as u64)?;
 
     if is_binary(content) {
+        tracing::warn!(path = %file_path, reason = "binary", "file skipped");
         return Err(ParserError::InvalidEncoding {
             path: file_path.to_string(),
         });
@@ -113,6 +115,10 @@ pub fn parse_file_with_tree(
         Language::Java => java::extract(&ctx, &tree),
     }?;
 
+    let span = tracing::Span::current();
+    span.record("language", tracing::field::debug(&language));
+    span.record("symbol_count", output.symbols.len());
+
     Ok(ParseOutputWithTree {
         output,
         source: source.to_string(),
@@ -125,6 +131,7 @@ pub fn parse_file_with_tree(
 ///
 /// This is the standard entry point. If you also need the tree-sitter AST
 /// (e.g., for chunking), use `parse_file_with_tree()` instead.
+#[tracing::instrument(skip(content), fields(language, symbol_count))]
 pub fn parse_file(
     repo_id: &str,
     file_path: &str,

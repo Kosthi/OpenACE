@@ -58,6 +58,8 @@ impl EngineBinding {
     #[new]
     #[pyo3(signature = (project_root, embedding_dim=None))]
     fn new(project_root: &str, embedding_dim: Option<usize>) -> PyResult<Self> {
+        crate::init_tracing();
+
         let path = PathBuf::from(project_root);
 
         let mgr = match embedding_dim {
@@ -82,8 +84,8 @@ impl EngineBinding {
     ///
     /// Temporarily drops the StorageManager to release the Tantivy lock,
     /// runs the indexer (which opens its own), then re-opens for queries.
-    #[pyo3(signature = (repo_root, chunk_enabled=false))]
-    fn index_full(&self, py: Python<'_>, repo_root: &str, chunk_enabled: bool) -> PyResult<PyIndexReport> {
+    #[pyo3(signature = (repo_root, chunk_enabled=false, trace_id=None))]
+    fn index_full(&self, py: Python<'_>, repo_root: &str, chunk_enabled: bool, trace_id: Option<String>) -> PyResult<PyIndexReport> {
         let path = PathBuf::from(repo_root);
         let repo_id = self.repo_id.clone();
         let project_root = self.project_root.clone();
@@ -91,6 +93,10 @@ impl EngineBinding {
         let inner = Arc::clone(&self.inner);
 
         py.allow_threads(move || {
+            let _span = tracing::info_span!(
+                "engine.index_full",
+                trace_id = %trace_id.as_deref().unwrap_or("")
+            ).entered();
             // Drop the existing StorageManager to release the Tantivy lock
             // before the indexer opens its own.
             {
@@ -129,6 +135,7 @@ impl EngineBinding {
         bm25_weight=1.0, vector_weight=1.0, exact_weight=1.0,
         chunk_bm25_weight=1.0, graph_weight=1.0,
         bm25_pool_size=None, vector_pool_size=None, graph_depth=None,
+        trace_id=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn search(
@@ -148,6 +155,7 @@ impl EngineBinding {
         bm25_pool_size: Option<usize>,
         vector_pool_size: Option<usize>,
         graph_depth: Option<u32>,
+        trace_id: Option<String>,
     ) -> PyResult<Vec<PySearchResult>> {
         let text = text.to_string();
         let lang = language.and_then(parse_language);
@@ -156,6 +164,10 @@ impl EngineBinding {
         let inner = Arc::clone(&self.inner);
 
         py.allow_threads(move || {
+            let _span = tracing::info_span!(
+                "engine.search",
+                trace_id = %trace_id.as_deref().unwrap_or("")
+            ).entered();
             let locked = lock_inner(&inner)?;
             let mgr = locked
                 .as_ref()
@@ -194,11 +206,16 @@ impl EngineBinding {
     }
 
     /// Find symbols by name (exact match on both name and qualified_name).
-    fn find_symbol(&self, py: Python<'_>, name: &str) -> PyResult<Vec<PySymbol>> {
+    #[pyo3(signature = (name, trace_id=None))]
+    fn find_symbol(&self, py: Python<'_>, name: &str, trace_id: Option<String>) -> PyResult<Vec<PySymbol>> {
         let name = name.to_string();
         let inner = Arc::clone(&self.inner);
 
         py.allow_threads(move || {
+            let _span = tracing::info_span!(
+                "engine.find_symbol",
+                trace_id = %trace_id.as_deref().unwrap_or("")
+            ).entered();
             let locked = lock_inner(&inner)?;
             let mgr = locked
                 .as_ref()
@@ -228,11 +245,16 @@ impl EngineBinding {
     }
 
     /// Get all symbols in a file (file outline).
-    fn get_file_outline(&self, py: Python<'_>, path: &str) -> PyResult<Vec<PySymbol>> {
+    #[pyo3(signature = (path, trace_id=None))]
+    fn get_file_outline(&self, py: Python<'_>, path: &str, trace_id: Option<String>) -> PyResult<Vec<PySymbol>> {
         let path = path.to_string();
         let inner = Arc::clone(&self.inner);
 
         py.allow_threads(move || {
+            let _span = tracing::info_span!(
+                "engine.get_file_outline",
+                trace_id = %trace_id.as_deref().unwrap_or("")
+            ).entered();
             let locked = lock_inner(&inner)?;
             let mgr = locked
                 .as_ref()

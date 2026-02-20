@@ -103,6 +103,7 @@ impl GraphStore {
         symbols: &[CodeSymbol],
         batch_size: usize,
     ) -> Result<(), StorageError> {
+        tracing::debug!(count = symbols.len(), "inserting symbols");
         let now = now_rfc3339();
         for chunk in symbols.chunks(batch_size) {
             let tx = self.conn.transaction()?;

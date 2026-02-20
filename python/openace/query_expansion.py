@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import logging
+import structlog
 import os
 import time
 import urllib.request
 from typing import Optional, Protocol
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 EXPANSION_PROMPT = """\
 You are a code search query expander. Given a natural language search query about code, \
@@ -126,10 +126,10 @@ class LLMQueryExpander:
                 # Limit to max_terms to avoid diluting BM25 signal
                 terms = first_line.split()[:self._max_terms]
                 expanded = f"{query} {' '.join(terms)}"
-                logger.info("Query expanded: %r -> %r", query, expanded)
+                logger.info("query expanded", original=query, expanded=expanded)
                 return expanded
         except Exception as exc:
-            logger.warning("Query expansion failed (%s), using original query", exc)
+            logger.warning("query expansion failed, using original", error=str(exc))
 
         return query
 

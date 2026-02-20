@@ -113,7 +113,11 @@ impl<'a> RetrievalEngine<'a> {
     }
 
     /// Execute a multi-signal search, fuse results via RRF, and return ranked hits.
+    #[tracing::instrument(skip(self), fields(result_count))]
     pub fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>, RetrievalError> {
+        let query_text = if query.text.len() > 100 { &query.text[..100] } else { &query.text };
+        tracing::debug!(query = %query_text, limit = query.limit, "search started");
+
         let mut candidates: HashMap<SymbolId, ScoredCandidate> = HashMap::new();
 
         // Signal 1: BM25 full-text search
@@ -162,6 +166,9 @@ impl<'a> RetrievalEngine<'a> {
             self.attach_related_symbols(&direct_hit_ids, &mut results, query)?;
         }
 
+        tracing::Span::current().record("result_count", results.len());
+        tracing::info!(fused_count = results.len(), "search completed");
+
         Ok(results)
     }
 
@@ -180,8 +187,13 @@ impl<'a> RetrievalEngine<'a> {
 
         let hits = match hits {
             Ok(h) => h,
-            Err(_) => return, // graceful degradation
+            Err(e) => {
+                tracing::warn!(signal = "bm25", error = %e, "signal failed, skipping");
+                return;
+            }
         };
+
+        tracing::debug!(signal = "bm25", count = hits.len(), "signal collected");
 
         for (rank, hit) in hits.iter().enumerate() {
             let rrf_score = 1.0 / (rank as f64 + 1.0 + RRF_K);
@@ -212,8 +224,13 @@ impl<'a> RetrievalEngine<'a> {
 
         let hits = match self.storage.vector().search_knn(query_vec, query.vector_pool_size) {
             Ok(h) => h,
-            Err(_) => return, // graceful degradation
+            Err(e) => {
+                tracing::warn!(signal = "vector", error = %e, "signal failed, skipping");
+                return;
+            }
         };
+
+        tracing::debug!(signal = "vector", count = hits.len(), "signal collected");
 
         for (rank, hit) in hits.iter().enumerate() {
             let rrf_score = 1.0 / (rank as f64 + 1.0 + RRF_K);
@@ -307,8 +324,13 @@ impl<'a> RetrievalEngine<'a> {
 
         let hits = match hits {
             Ok(h) => h,
-            Err(_) => return, // graceful degradation
+            Err(e) => {
+                tracing::warn!(signal = "chunk_bm25", error = %e, "signal failed, skipping");
+                return;
+            }
         };
+
+        tracing::debug!(signal = "chunk_bm25", count = hits.len(), "signal collected");
 
         if hits.is_empty() {
             return;
@@ -416,6 +438,8 @@ impl<'a> RetrievalEngine<'a> {
 
         // Sort by depth (closer neighbors rank higher), then by SymbolId for determinism
         filtered.sort_by(|(sid_a, d_a), (sid_b, d_b)| d_a.cmp(d_b).then_with(|| sid_a.cmp(sid_b)));
+
+        tracing::debug!(signal = "graph", count = filtered.len(), "signal collected");
 
         for (rank, (sid, _)) in filtered.iter().enumerate() {
             let rrf_score = 1.0 / (rank as f64 + 1.0 + RRF_K);

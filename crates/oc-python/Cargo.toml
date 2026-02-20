@@ -15,3 +15,6 @@ oc-core = { workspace = true }
 oc-storage = { workspace = true }
 oc-indexer = { workspace = true }
 oc-retrieval = { workspace = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-log.workspace = true

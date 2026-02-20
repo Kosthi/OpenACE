@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import logging
+import structlog
 import os
 import re
 import time
@@ -11,7 +11,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -158,11 +158,11 @@ class LLMSignalWeighter:
                 chunk_bm25=_clamp(weights_dict.get("chunk_bm25", 1.0)),
                 graph=_clamp(weights_dict.get("graph", 1.0)),
             )
-            logger.info("Signal weights for %r: %s", query, weights)
+            logger.info("signal weights computed", query=query, weights=str(weights))
             return weights
 
         except Exception as exc:
-            logger.warning("Signal weighting failed (%s), using defaults", exc)
+            logger.warning("signal weighting failed, using defaults", error=str(exc))
             return SignalWeights()
 
 

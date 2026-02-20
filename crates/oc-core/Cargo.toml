@@ -10,3 +10,4 @@ description = "Shared types and utilities for OpenACE"
 xxhash-rust.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+tracing.workspace = true

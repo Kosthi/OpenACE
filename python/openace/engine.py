@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-import logging
 import os
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
+
+import structlog
 
 from openace.exceptions import IndexingError, OpenACEError, SearchError
 from openace.types import ChunkInfo, IndexReport, SearchResult, Symbol
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # Path segments that indicate a test file
 _TEST_MARKERS = {"test", "tests", "test_", "_test", "spec", "specs", "__tests__"}
@@ -164,36 +166,45 @@ class Engine:
         """The absolute path to the project root."""
         return self._project_root
 
-    def index(self, *, incremental: bool = True) -> IndexReport:
+    def index(self, *, incremental: bool = True, trace_id: Optional[str] = None) -> IndexReport:
         """Run indexing on the project.
 
         Args:
             incremental: Currently ignored (always full index).
+            trace_id: Optional trace ID for correlation.
 
         Returns:
             IndexReport with statistics about the indexing run.
         """
-        try:
-            py_report = self._core.index_full(self._project_root, self._chunk_enabled)
-            report = _convert_index_report(py_report)
-        except Exception as e:
-            raise IndexingError(f"indexing failed: {e}") from e
-
-        # Auto-embed if provider is set
-        if self._embedding_provider is not None:
-            self.embed_all()
-
-        # Generate file-level summaries
-        if self._summary_enabled:
+        trace_id = trace_id or str(uuid.uuid4())
+        with structlog.contextvars.bound_contextvars(trace_id=trace_id):
             try:
-                from openace.summary import RuleBasedSummaryGenerator, generate_file_summaries
-                generator = RuleBasedSummaryGenerator()
-                summary_count = generate_file_summaries(self._core, generator)
-                logger.info("Generated %d file summaries", summary_count)
+                py_report = self._core.index_full(
+                    self._project_root, self._chunk_enabled, trace_id=trace_id
+                )
+                report = _convert_index_report(py_report)
             except Exception as e:
-                logger.warning("Summary generation failed (%s): %s", type(e).__name__, e)
+                raise IndexingError(f"indexing failed: {e}") from e
 
-        return report
+            # Auto-embed if provider is set
+            if self._embedding_provider is not None:
+                self.embed_all(trace_id=trace_id)
+
+            # Generate file-level summaries
+            if self._summary_enabled:
+                try:
+                    from openace.summary import RuleBasedSummaryGenerator, generate_file_summaries
+                    generator = RuleBasedSummaryGenerator()
+                    summary_count = generate_file_summaries(self._core, generator)
+                    logger.info("generated file summaries", count=summary_count)
+                except Exception as e:
+                    logger.warning(
+                        "summary generation failed",
+                        exception_type=type(e).__name__,
+                        error=str(e),
+                    )
+
+            return report
 
     def _validate_path(self, path: str) -> None:
         """Validate that a relative path stays within the project root."""
@@ -209,6 +220,7 @@ class Engine:
         language: Optional[str] = None,
         file_path: Optional[str] = None,
         dedupe_by_file: bool = True,
+        trace_id: Optional[str] = None,
     ) -> list[SearchResult]:
         """Search for symbols using multi-signal retrieval.
 
@@ -219,198 +231,207 @@ class Engine:
             file_path: Optional file path prefix filter.
             dedupe_by_file: If True, keep only the highest-scoring symbol
                 per file so that results cover more distinct files.
+            trace_id: Optional trace ID for correlation.
 
         Returns:
             List of SearchResult sorted by relevance score.
         """
-        try:
-            if file_path is not None:
-                self._validate_path(file_path)
+        trace_id = trace_id or str(uuid.uuid4())
+        with structlog.contextvars.bound_contextvars(trace_id=trace_id):
+            try:
+                if file_path is not None:
+                    self._validate_path(file_path)
 
-            if limit <= 0:
-                return []
+                if limit <= 0:
+                    return []
 
-            # Stage 0: query expansion for better BM25 recall
-            search_query = query
-            if self._query_expander is not None:
-                try:
-                    search_query = self._query_expander.expand(query)
-                except Exception as e:
-                    logger.warning(
-                        "Query expansion failed (%s), using original query",
-                        type(e).__name__,
-                    )
+                # Stage 0: query expansion for better BM25 recall
+                search_query = query
+                if self._query_expander is not None:
+                    try:
+                        search_query = self._query_expander.expand(query)
+                    except Exception as e:
+                        logger.warning(
+                            "query expansion failed, using original query",
+                            exception_type=type(e).__name__,
+                            error=str(e),
+                        )
 
-            query_vector = None
-            if self._embedding_provider is not None:
-                vectors = self._embedding_provider.embed([query])
-                query_vector = vectors[0].tolist()
+                query_vector = None
+                if self._embedding_provider is not None:
+                    vectors = self._embedding_provider.embed([query])
+                    query_vector = vectors[0].tolist()
 
-            # Stage 0.5: signal weight generation
-            from openace.signal_weighting import SignalWeights
+                # Stage 0.5: signal weight generation
+                from openace.signal_weighting import SignalWeights
 
-            weights = SignalWeights()
-            if self._signal_weighter is not None:
-                try:
-                    weights = self._signal_weighter.compute_weights(query)
-                except Exception as e:
-                    logger.warning(
-                        "Signal weighting failed (%s), using defaults",
-                        type(e).__name__,
-                    )
+                weights = SignalWeights()
+                if self._signal_weighter is not None:
+                    try:
+                        weights = self._signal_weighter.compute_weights(query)
+                    except Exception as e:
+                        logger.warning(
+                            "signal weighting failed, using defaults",
+                            exception_type=type(e).__name__,
+                            error=str(e),
+                        )
 
-            # Stage 1: retrieval with expanded pool
-            # Expand when reranker or file-dedup is active so we have
-            # enough candidates after filtering.
-            if self._reranker is not None or dedupe_by_file:
-                retrieval_limit = max(limit * 5, self._rerank_pool_size)
-                retrieval_limit = min(retrieval_limit, 200)  # Rust upper bound
-            else:
-                retrieval_limit = limit
+                # Stage 1: retrieval with expanded pool
+                # Expand when reranker or file-dedup is active so we have
+                # enough candidates after filtering.
+                if self._reranker is not None or dedupe_by_file:
+                    retrieval_limit = max(limit * 5, self._rerank_pool_size)
+                    retrieval_limit = min(retrieval_limit, 200)  # Rust upper bound
+                else:
+                    retrieval_limit = limit
 
-            py_results = self._core.search(
-                search_query,
-                query_vector,
-                retrieval_limit,
-                language,
-                file_path,
-                self._chunk_enabled,
-                bm25_weight=weights.bm25,
-                vector_weight=weights.vector,
-                exact_weight=weights.exact,
-                chunk_bm25_weight=weights.chunk_bm25,
-                graph_weight=weights.graph,
-            )
-            results = [_convert_search_result(r) for r in py_results]
-
-            # Stage 2: rerank if reranker is configured
-            if self._reranker is not None:
-                try:
-                    results = self._reranker.rerank(
-                        query, results, top_k=retrieval_limit,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Reranker failed (%s), falling back to original ranking",
-                        type(e).__name__,
-                    )
-
-            # Stage 3: file-level dedup — keep best symbol per file.
-            # Prefer methods/functions over classes/modules/constants since
-            # they are more specific and actionable for understanding code.
-            if dedupe_by_file:
-                best_per_file: dict[str, SearchResult] = {}
-                for r in results:
-                    prev = best_per_file.get(r.file_path)
-                    if prev is None:
-                        best_per_file[r.file_path] = r
-                    elif r.kind in _SPECIFIC_KINDS and prev.kind not in _SPECIFIC_KINDS:
-                        # Replace generic symbol with a more specific one
-                        best_per_file[r.file_path] = r
-                    elif (
-                        r.kind in _SPECIFIC_KINDS
-                        and prev.name in _GENERIC_NAMES
-                        and r.name not in _GENERIC_NAMES
-                    ):
-                        # Prefer named methods over dunder methods
-                        best_per_file[r.file_path] = r
-
-                # Separate into tiers:
-                #   1. source files (direct + graph-expanded, sorted together)
-                #   2. test files
-                #   3. low-value kinds (constants, variables, modules)
-                # Graph-only results get a mild score penalty so direct
-                # matches rank higher, but they stay in the main tier
-                # to preserve domain breadth.
-                _GRAPH_ONLY = {"graph"}
-                source_results: list[SearchResult] = []
-                test_results: list[SearchResult] = []
-                lowval_results: list[SearchResult] = []
-                for r in best_per_file.values():
-                    if r.kind in _LOW_VALUE_KINDS:
-                        lowval_results.append(r)
-                    elif r.file_path.endswith(_INIT_FILE):
-                        lowval_results.append(r)
-                    elif _is_test_file(r.file_path):
-                        test_results.append(r)
-                    else:
-                        source_results.append(r)
-                # Sort key: prefer rerank_score (from reranker) over
-                # the raw RRF score so reranker judgements are respected.
-                # Graph-only results get a 30% penalty to rank below
-                # direct matches at similar scores.
-                def _sort_key(r: SearchResult) -> float:
-                    base = r.rerank_score if r.rerank_score is not None else r.score
-                    if set(r.match_signals) == _GRAPH_ONLY:
-                        base *= 0.7
-                    elif len(r.match_signals) == 1:
-                        base *= 0.85  # demote single-signal noise
-                    return base
-
-                source_results.sort(key=_sort_key, reverse=True)
-                test_results.sort(key=_sort_key, reverse=True)
-                lowval_results.sort(key=_sort_key, reverse=True)
-                results = (
-                    source_results
-                    + test_results
-                    + lowval_results
+                py_results = self._core.search(
+                    search_query,
+                    query_vector,
+                    retrieval_limit,
+                    language,
+                    file_path,
+                    self._chunk_enabled,
+                    bm25_weight=weights.bm25,
+                    vector_weight=weights.vector,
+                    exact_weight=weights.exact,
+                    chunk_bm25_weight=weights.chunk_bm25,
+                    graph_weight=weights.graph,
+                    trace_id=trace_id,
                 )
+                results = [_convert_search_result(r) for r in py_results]
 
-            # Stage 4: score-gap cutoff — detect a significant score
-            # drop between consecutive results and cut there.  This
-            # trims the tail of weakly-matching noise.
-            _MIN_RESULTS = min(limit, 5)
-            if len(results) > _MIN_RESULTS:
-                def _eff_score(r: SearchResult) -> float:
-                    return r.rerank_score if r.rerank_score is not None else r.score
+                # Stage 2: rerank if reranker is configured
+                if self._reranker is not None:
+                    try:
+                        results = self._reranker.rerank(
+                            query, results, top_k=retrieval_limit,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "reranker failed, falling back to original ranking",
+                            exception_type=type(e).__name__,
+                            error=str(e),
+                        )
 
-                cut_idx = len(results)
-                for idx in range(_MIN_RESULTS, len(results)):
-                    prev = _eff_score(results[idx - 1])
-                    cur = _eff_score(results[idx])
-                    if prev > 0 and cur / prev < 0.6:
-                        cut_idx = idx
-                        break
-                results = results[:max(cut_idx, _MIN_RESULTS)]
+                # Stage 3: file-level dedup — keep best symbol per file.
+                # Prefer methods/functions over classes/modules/constants since
+                # they are more specific and actionable for understanding code.
+                if dedupe_by_file:
+                    best_per_file: dict[str, SearchResult] = {}
+                    for r in results:
+                        prev = best_per_file.get(r.file_path)
+                        if prev is None:
+                            best_per_file[r.file_path] = r
+                        elif r.kind in _SPECIFIC_KINDS and prev.kind not in _SPECIFIC_KINDS:
+                            # Replace generic symbol with a more specific one
+                            best_per_file[r.file_path] = r
+                        elif (
+                            r.kind in _SPECIFIC_KINDS
+                            and prev.name in _GENERIC_NAMES
+                            and r.name not in _GENERIC_NAMES
+                        ):
+                            # Prefer named methods over dunder methods
+                            best_per_file[r.file_path] = r
 
-            return results[:limit]
-        except OpenACEError:
-            raise
-        except Exception as e:
-            raise SearchError(f"search failed: {e}") from e
+                    # Separate into tiers:
+                    #   1. source files (direct + graph-expanded, sorted together)
+                    #   2. test files
+                    #   3. low-value kinds (constants, variables, modules)
+                    # Graph-only results get a mild score penalty so direct
+                    # matches rank higher, but they stay in the main tier
+                    # to preserve domain breadth.
+                    _GRAPH_ONLY = {"graph"}
+                    source_results: list[SearchResult] = []
+                    test_results: list[SearchResult] = []
+                    lowval_results: list[SearchResult] = []
+                    for r in best_per_file.values():
+                        if r.kind in _LOW_VALUE_KINDS:
+                            lowval_results.append(r)
+                        elif r.file_path.endswith(_INIT_FILE):
+                            lowval_results.append(r)
+                        elif _is_test_file(r.file_path):
+                            test_results.append(r)
+                        else:
+                            source_results.append(r)
+                    # Sort key: prefer rerank_score (from reranker) over
+                    # the raw RRF score so reranker judgements are respected.
+                    # Graph-only results get a 30% penalty to rank below
+                    # direct matches at similar scores.
+                    def _sort_key(r: SearchResult) -> float:
+                        base = r.rerank_score if r.rerank_score is not None else r.score
+                        if set(r.match_signals) == _GRAPH_ONLY:
+                            base *= 0.7
+                        elif len(r.match_signals) == 1:
+                            base *= 0.85  # demote single-signal noise
+                        return base
 
-    def find_symbol(self, name: str) -> list[Symbol]:
+                    source_results.sort(key=_sort_key, reverse=True)
+                    test_results.sort(key=_sort_key, reverse=True)
+                    lowval_results.sort(key=_sort_key, reverse=True)
+                    results = (
+                        source_results
+                        + test_results
+                        + lowval_results
+                    )
+
+                # Stage 4: score-gap cutoff — detect a significant score
+                # drop between consecutive results and cut there.  This
+                # trims the tail of weakly-matching noise.
+                _MIN_RESULTS = min(limit, 5)
+                if len(results) > _MIN_RESULTS:
+                    def _eff_score(r: SearchResult) -> float:
+                        return r.rerank_score if r.rerank_score is not None else r.score
+
+                    cut_idx = len(results)
+                    for idx in range(_MIN_RESULTS, len(results)):
+                        prev = _eff_score(results[idx - 1])
+                        cur = _eff_score(results[idx])
+                        if prev > 0 and cur / prev < 0.6:
+                            cut_idx = idx
+                            break
+                    results = results[:max(cut_idx, _MIN_RESULTS)]
+
+                return results[:limit]
+            except OpenACEError:
+                raise
+            except Exception as e:
+                raise SearchError(f"search failed: {e}") from e
+
+    def find_symbol(self, name: str, *, trace_id: Optional[str] = None) -> list[Symbol]:
         """Find symbols by exact name match.
 
         Args:
             name: Symbol name or qualified name to search for.
+            trace_id: Optional trace ID for correlation.
 
         Returns:
             List of matching Symbol objects.
         """
         try:
-            py_syms = self._core.find_symbol(name)
+            py_syms = self._core.find_symbol(name, trace_id=trace_id)
             return [_convert_symbol(s) for s in py_syms]
         except Exception as e:
             raise SearchError(f"find_symbol failed: {e}") from e
 
-    def get_file_outline(self, path: str) -> list[Symbol]:
+    def get_file_outline(self, path: str, *, trace_id: Optional[str] = None) -> list[Symbol]:
         """Get all symbols defined in a file.
 
         Args:
             path: Relative file path within the project.
+            trace_id: Optional trace ID for correlation.
 
         Returns:
             List of Symbol objects in the file.
         """
         try:
             self._validate_path(path)
-            py_syms = self._core.get_file_outline(path)
+            py_syms = self._core.get_file_outline(path, trace_id=trace_id)
             return [_convert_symbol(s) for s in py_syms]
         except Exception as e:
             raise SearchError(f"get_file_outline failed: {e}") from e
 
-    def embed_all(self) -> int:
+    def embed_all(self, *, trace_id: Optional[str] = None) -> int:
         """Compute and store embeddings for all indexed symbols.
 
         Uses adaptive concurrent embedding: multiple batches are sent
@@ -541,7 +562,7 @@ class Engine:
                     failed += 1
                     strategy.record(False)
                     logger.warning(
-                        "Embedding batch at offset %d failed", offset, exc_info=True,
+                        "embedding batch failed", offset=offset, exc_info=True,
                     )
 
                 # Refill up to current concurrency
@@ -551,7 +572,7 @@ class Engine:
                     next_offset += batch_size
 
         if failed:
-            logger.warning("Embedding completed with %d failed batches", failed)
+            logger.warning("embedding completed with failures", failed_batches=failed)
 
         self._core.flush()
         return total_embedded

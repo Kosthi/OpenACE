@@ -10,6 +10,7 @@ const BINARY_CHECK_SIZE: usize = 8192;
 /// Returns `Err(ParserError::FileTooLarge)` if the file exceeds 1 MB.
 pub fn check_file_size(path: &str, size: u64) -> Result<(), ParserError> {
     if size > MAX_FILE_SIZE {
+        tracing::warn!(path = %path, size = size, reason = "too_large", "file skipped");
         return Err(ParserError::FileTooLarge {
             path: path.to_string(),
             size,

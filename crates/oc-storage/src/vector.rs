@@ -149,6 +149,7 @@ impl VectorStore {
     }
 
     /// Search for the k nearest neighbors of the query vector.
+    #[tracing::instrument(skip(self, query), fields(result_count))]
     pub fn search_knn(
         &self,
         query: &[f32],
@@ -168,7 +169,7 @@ impl VectorStore {
                 reason: format!("search failed: {e}"),
             }
         })?;
-        let hits = matches
+        let hits: Vec<VectorHit> = matches
             .keys
             .iter()
             .zip(matches.distances.iter())
@@ -179,6 +180,7 @@ impl VectorStore {
                 })
             })
             .collect();
+        tracing::Span::current().record("result_count", hits.len());
         Ok(hits)
     }
 

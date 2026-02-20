@@ -60,6 +60,11 @@ ignore = "0.4"
 # Crossbeam channels
 crossbeam-channel = "0.5"
 
+# Logging / tracing
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "ansi", "registry", "env-filter", "json"] }
+tracing-log = { version = "0.2", default-features = false, features = ["std", "log-tracer"] }
+
 # Dev / benchmarks
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
