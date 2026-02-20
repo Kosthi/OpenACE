@@ -6,6 +6,10 @@ import os
 import time
 from typing import Optional
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 
 class OpenAIEmbedder:
     """Embedding using OpenAI API.
@@ -79,16 +83,25 @@ class OpenAIEmbedder:
                 if attempt == max_attempts - 1:
                     raise
                 wait = min(30 * (2 ** attempt), 120)
-                print(f"  [embed] rate limited, waiting {wait}s "
-                      f"(attempt {attempt + 1}/{max_attempts})")
+                logger.warning(
+                    "rate limited, retrying",
+                    wait_seconds=wait,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                )
                 time.sleep(wait)
             except APIStatusError as exc:
                 if exc.status_code in (403, 500, 502, 503, 504):
                     if attempt == max_attempts - 1:
                         raise
                     wait = min(5 * (2 ** attempt), 60)
-                    print(f"  [embed] HTTP {exc.status_code}, retrying in {wait}s "
-                          f"(attempt {attempt + 1}/{max_attempts})")
+                    logger.warning(
+                        "HTTP error, retrying",
+                        status_code=exc.status_code,
+                        wait_seconds=wait,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                    )
                     time.sleep(wait)
                 else:
                     raise
@@ -121,8 +134,13 @@ class OpenAIEmbedder:
             batch_vecs = self._call_with_retry(client, kwargs)
             all_embeddings.extend(batch_vecs)
             if n_batches > 1:
-                print(f"  [embed] batch {idx + 1}/{n_batches} done "
-                      f"({len(all_embeddings)}/{len(texts)} texts)")
+                logger.debug(
+                    "embedding batch done",
+                    batch=idx + 1,
+                    total_batches=n_batches,
+                    embedded=len(all_embeddings),
+                    total=len(texts),
+                )
 
         if not all_embeddings:
             return np.zeros((0, self._dimension), dtype=np.float32)

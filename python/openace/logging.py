@@ -10,19 +10,26 @@ def redact_sensitive_data(_, __, event_dict: Dict[str, Any]) -> Dict[str, Any]:
     sensitive_keys = {"api_key", "token", "secret", "authorization", "password"}
     for key in list(event_dict.keys()):
         if any(sk in key.lower() for sk in sensitive_keys):
-            event_dict[key] = "********"
+            event_dict[key] = "[REDACTED]"
     return event_dict
 
 def configure_logging(level: Optional[str] = None, log_format: Optional[str] = None):
-    """Configure structlog for OpenACE."""
-    
+    """Configure structlog for OpenACE.
+
+    Can be called multiple times (e.g., from CLI after import-time defaults).
+    Resets cached loggers so the new configuration takes effect.
+    """
+    # Reset any cached loggers from a previous configure() call so
+    # reconfiguration (e.g., CLI --verbose after import-time default) works.
+    structlog.reset_defaults()
+
     # Priority: argument > environment variable > default
     effective_level_str = (level or os.environ.get("OPENACE_LOG_LEVEL", "WARN")).upper()
     effective_format = (log_format or os.environ.get("OPENACE_LOG_FORMAT", "pretty")).lower()
 
     # Map string level to numeric level for filtering
     level_map = {
-        "TRACE": 5, # Custom
+        "TRACE": logging.DEBUG,  # structlog has no TRACE; clamp to DEBUG
         "DEBUG": logging.DEBUG,
         "INFO": logging.INFO,
         "WARN": logging.WARNING,

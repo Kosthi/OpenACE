@@ -110,7 +110,7 @@ def _build_engine_kwargs(
 
 @click.group()
 @click.version_option(package_name="openace")
-@click.option("--verbose", "-v", is_flag=True, default=False, help="Enable verbose (debug) logging.")
+@click.option("--verbose", "-v", count=True, help="Increase verbosity (-v=info, -vv=debug).")
 @click.option("--quiet", "-q", is_flag=True, default=False, help="Suppress all output except errors.")
 @click.pass_context
 def main(ctx, verbose, quiet):
@@ -118,8 +118,10 @@ def main(ctx, verbose, quiet):
     if verbose and quiet:
         raise click.UsageError("Cannot use --verbose and --quiet together.")
 
-    if verbose:
+    if verbose >= 2:
         level = "DEBUG"
+    elif verbose == 1:
+        level = "INFO"
     elif quiet:
         level = "ERROR"
     else:

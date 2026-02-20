@@ -176,7 +176,7 @@ class Engine:
         Returns:
             IndexReport with statistics about the indexing run.
         """
-        trace_id = trace_id or str(uuid.uuid4())
+        trace_id = trace_id or uuid.uuid4().hex[:16]
         with structlog.contextvars.bound_contextvars(trace_id=trace_id):
             try:
                 py_report = self._core.index_full(
@@ -236,7 +236,7 @@ class Engine:
         Returns:
             List of SearchResult sorted by relevance score.
         """
-        trace_id = trace_id or str(uuid.uuid4())
+        trace_id = trace_id or uuid.uuid4().hex[:16]
         with structlog.contextvars.bound_contextvars(trace_id=trace_id):
             try:
                 if file_path is not None:
@@ -408,11 +408,13 @@ class Engine:
         Returns:
             List of matching Symbol objects.
         """
-        try:
-            py_syms = self._core.find_symbol(name, trace_id=trace_id)
-            return [_convert_symbol(s) for s in py_syms]
-        except Exception as e:
-            raise SearchError(f"find_symbol failed: {e}") from e
+        trace_id = trace_id or uuid.uuid4().hex[:16]
+        with structlog.contextvars.bound_contextvars(trace_id=trace_id):
+            try:
+                py_syms = self._core.find_symbol(name, trace_id=trace_id)
+                return [_convert_symbol(s) for s in py_syms]
+            except Exception as e:
+                raise SearchError(f"find_symbol failed: {e}") from e
 
     def get_file_outline(self, path: str, *, trace_id: Optional[str] = None) -> list[Symbol]:
         """Get all symbols defined in a file.
@@ -424,12 +426,14 @@ class Engine:
         Returns:
             List of Symbol objects in the file.
         """
-        try:
-            self._validate_path(path)
-            py_syms = self._core.get_file_outline(path, trace_id=trace_id)
-            return [_convert_symbol(s) for s in py_syms]
-        except Exception as e:
-            raise SearchError(f"get_file_outline failed: {e}") from e
+        trace_id = trace_id or uuid.uuid4().hex[:16]
+        with structlog.contextvars.bound_contextvars(trace_id=trace_id):
+            try:
+                self._validate_path(path)
+                py_syms = self._core.get_file_outline(path, trace_id=trace_id)
+                return [_convert_symbol(s) for s in py_syms]
+            except Exception as e:
+                raise SearchError(f"get_file_outline failed: {e}") from e
 
     def embed_all(self, *, trace_id: Optional[str] = None) -> int:
         """Compute and store embeddings for all indexed symbols.

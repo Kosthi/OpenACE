@@ -303,7 +303,9 @@ pub fn update_file(
         // Delete old chunks for this file
         let old_chunks = storage.graph().get_chunks_by_file(rel_path)?;
         for c in &old_chunks {
-            let _ = storage.fulltext_mut().delete_chunk_document(c.id);
+            if let Err(e) = storage.fulltext_mut().delete_chunk_document(c.id) {
+                tracing::warn!(error = %e, chunk_id = ?c.id, "chunk fulltext delete failed");
+            }
         }
         storage.graph_mut().delete_chunks_by_file(rel_path)?;
 
@@ -321,7 +323,9 @@ pub fn update_file(
                 .graph_mut()
                 .insert_chunks(&new_chunks, INCREMENTAL_BATCH_SIZE)?;
             for chunk in &new_chunks {
-                let _ = storage.fulltext_mut().add_chunk_document(chunk);
+                if let Err(e) = storage.fulltext_mut().add_chunk_document(chunk) {
+                    tracing::warn!(error = %e, "chunk fulltext index failed");
+                }
             }
         }
     }
@@ -363,7 +367,9 @@ pub fn delete_file(
         storage.fulltext_mut().delete_document(sym.id)?;
     }
     for chunk in &old_chunks {
-        let _ = storage.fulltext_mut().delete_chunk_document(chunk.id);
+        if let Err(e) = storage.fulltext_mut().delete_chunk_document(chunk.id) {
+            tracing::warn!(error = %e, chunk_id = ?chunk.id, "chunk fulltext delete failed");
+        }
     }
 
     Ok(IncrementalReport {

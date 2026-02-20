@@ -113,10 +113,13 @@ impl<'a> RetrievalEngine<'a> {
     }
 
     /// Execute a multi-signal search, fuse results via RRF, and return ranked hits.
-    #[tracing::instrument(skip(self), fields(result_count))]
+    #[tracing::instrument(skip(self, query), fields(query, limit, result_count))]
     pub fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>, RetrievalError> {
         let query_text = if query.text.len() > 100 { &query.text[..100] } else { &query.text };
-        tracing::debug!(query = %query_text, limit = query.limit, "search started");
+        let span = tracing::Span::current();
+        span.record("query", query_text);
+        span.record("limit", query.limit);
+        tracing::debug!("search started");
 
         let mut candidates: HashMap<SymbolId, ScoredCandidate> = HashMap::new();
 
@@ -258,20 +261,30 @@ impl<'a> RetrievalEngine<'a> {
         let mut seen: HashSet<SymbolId> = HashSet::new();
 
         // Name match
-        if let Ok(syms) = self.storage.graph().get_symbols_by_name(&query.text) {
-            for sym in syms {
-                if seen.insert(sym.id) {
-                    exact_hits.push(sym);
+        match self.storage.graph().get_symbols_by_name(&query.text) {
+            Ok(syms) => {
+                for sym in syms {
+                    if seen.insert(sym.id) {
+                        exact_hits.push(sym);
+                    }
                 }
+            }
+            Err(e) => {
+                tracing::warn!(signal = "exact", error = %e, "signal failed on name lookup, skipping");
             }
         }
 
         // Qualified name match
-        if let Ok(syms) = self.storage.graph().get_symbols_by_qualified_name(&query.text) {
-            for sym in syms {
-                if seen.insert(sym.id) {
-                    exact_hits.push(sym);
+        match self.storage.graph().get_symbols_by_qualified_name(&query.text) {
+            Ok(syms) => {
+                for sym in syms {
+                    if seen.insert(sym.id) {
+                        exact_hits.push(sym);
+                    }
                 }
+            }
+            Err(e) => {
+                tracing::warn!(signal = "exact", error = %e, "signal failed on qualified name lookup, skipping");
             }
         }
 
@@ -291,6 +304,8 @@ impl<'a> RetrievalEngine<'a> {
         });
 
         exact_hits.truncate(query.exact_match_pool_size);
+
+        tracing::debug!(signal = "exact", count = exact_hits.len(), "signal collected");
 
         for (rank, sym) in exact_hits.iter().enumerate() {
             let rrf_score = 1.0 / (rank as f64 + 1.0 + RRF_K);
