@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-OpenACE is an AI-native code intelligence engine: Rust core with Python bindings, exposing a CLI, Python SDK, and MCP server. It unifies semantic code search, IDE navigation, code intelligence, and real-time indexing.
+OpenACE is an AI-native Contextual Code Engine: Rust core with Python bindings, exposing a CLI, Python SDK, and MCP server. It unifies semantic code search, IDE navigation, code intelligence, and real-time indexing.
 
 ## Architecture Overview
 
@@ -88,19 +88,19 @@ cargo build
 cargo build --release
 
 # Build Python extension (development mode, editable install)
-maturin develop
+uv run maturin develop
 
 # Build Python extension (release)
-maturin develop --release
+uv run maturin develop --release
 
 # Install with optional dependencies
-pip install -e ".[dev]"          # dev/test deps
-pip install -e ".[onnx]"         # local ONNX embedding
-pip install -e ".[openai]"       # OpenAI embedding
-pip install -e ".[mcp]"          # MCP server support
-pip install -e ".[rerank-local]" # local cross-encoder reranker
-pip install -e ".[rerank-cohere]" # Cohere reranker
-pip install -e ".[rerank-openai]" # OpenAI reranker
+uv pip install -e ".[dev]"          # dev/test deps
+uv pip install -e ".[onnx]"         # local ONNX embedding
+uv pip install -e ".[openai]"       # OpenAI embedding
+uv pip install -e ".[mcp]"          # MCP server support
+uv pip install -e ".[rerank-local]" # local cross-encoder reranker
+uv pip install -e ".[rerank-cohere]" # Cohere reranker
+uv pip install -e ".[rerank-openai]" # OpenAI reranker
 ```
 
 ### CLI Usage
@@ -160,13 +160,13 @@ cargo bench -p oc-bench
 
 ```bash
 # Run all Python integration tests
-pytest tests/
+uv run pytest tests/
 
 # Run specific test files
-pytest tests/test_engine.py
-pytest tests/test_embedding.py
-pytest tests/test_mcp.py
-pytest tests/test_reranking.py
+uv run pytest tests/test_engine.py
+uv run pytest tests/test_embedding.py
+uv run pytest tests/test_mcp.py
+uv run pytest tests/test_reranking.py
 ```
 
 **Python test locations:**
@@ -257,6 +257,10 @@ Index data is stored in `<project_root>/.openace/`:
 ## Supported Languages
 
 Python, TypeScript, JavaScript, Rust, Go, Java.
+
+## Tooling
+
+- Always use `uv` when running Python commands (e.g., `uv pip install`, `uv run pytest`, `uv run maturin develop`). Do not use bare `pip` or `python` directly.
 
 ## AI Usage Guidelines
 
