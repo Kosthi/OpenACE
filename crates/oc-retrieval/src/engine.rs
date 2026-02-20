@@ -26,6 +26,16 @@ pub struct SearchQuery {
     pub enable_chunk_search: bool,
     /// Pool size for chunk BM25 retrieval.
     pub chunk_bm25_pool_size: usize,
+    /// Weight multiplier for BM25 signal (default 1.0).
+    pub bm25_weight: f64,
+    /// Weight multiplier for vector k-NN signal (default 1.0).
+    pub vector_weight: f64,
+    /// Weight multiplier for exact match signal (default 1.0).
+    pub exact_weight: f64,
+    /// Weight multiplier for chunk BM25 signal (default 1.0).
+    pub chunk_bm25_weight: f64,
+    /// Weight multiplier for graph expansion signal (default 1.0).
+    pub graph_weight: f64,
 }
 
 impl SearchQuery {
@@ -43,6 +53,11 @@ impl SearchQuery {
             vector_pool_size: 100,
             enable_chunk_search: false,
             chunk_bm25_pool_size: 100,
+            bm25_weight: 1.0,
+            vector_weight: 1.0,
+            exact_weight: 1.0,
+            chunk_bm25_weight: 1.0,
+            graph_weight: 1.0,
         }
     }
 
@@ -177,7 +192,7 @@ impl<'a> RetrievalEngine<'a> {
                     score: 0.0,
                     signals: Vec::new(),
                 });
-            entry.score += rrf_score;
+            entry.score += query.bm25_weight * rrf_score;
             if !entry.signals.contains(&"bm25".to_string()) {
                 entry.signals.push("bm25".to_string());
             }
@@ -209,7 +224,7 @@ impl<'a> RetrievalEngine<'a> {
                     score: 0.0,
                     signals: Vec::new(),
                 });
-            entry.score += rrf_score;
+            entry.score += query.vector_weight * rrf_score;
             if !entry.signals.contains(&"vector".to_string()) {
                 entry.signals.push("vector".to_string());
             }
@@ -269,7 +284,7 @@ impl<'a> RetrievalEngine<'a> {
                     score: 0.0,
                     signals: Vec::new(),
                 });
-            entry.score += rrf_score;
+            entry.score += query.exact_weight * rrf_score;
             if !entry.signals.contains(&"exact".to_string()) {
                 entry.signals.push("exact".to_string());
             }
@@ -337,7 +352,7 @@ impl<'a> RetrievalEngine<'a> {
                     score: 0.0,
                     signals: Vec::new(),
                 });
-            entry.score += rrf_score;
+            entry.score += query.chunk_bm25_weight * rrf_score;
             if !entry.signals.contains(&"chunk_bm25".to_string()) {
                 entry.signals.push("chunk_bm25".to_string());
             }
@@ -411,7 +426,7 @@ impl<'a> RetrievalEngine<'a> {
                     score: 0.0,
                     signals: Vec::new(),
                 });
-            entry.score += rrf_score;
+            entry.score += query.graph_weight * rrf_score;
             if !entry.signals.contains(&"graph".to_string()) {
                 entry.signals.push("graph".to_string());
             }
@@ -702,6 +717,11 @@ mod tests {
         assert_eq!(q.vector_pool_size, 100);
         assert!(!q.enable_chunk_search);
         assert_eq!(q.chunk_bm25_pool_size, 100);
+        assert!((q.bm25_weight - 1.0).abs() < f64::EPSILON);
+        assert!((q.vector_weight - 1.0).abs() < f64::EPSILON);
+        assert!((q.exact_weight - 1.0).abs() < f64::EPSILON);
+        assert!((q.chunk_bm25_weight - 1.0).abs() < f64::EPSILON);
+        assert!((q.graph_weight - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]

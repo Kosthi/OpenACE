@@ -10,6 +10,7 @@ import click
 EMBEDDING_CHOICES = ["local", "openai", "siliconflow", "voyage", "voyage-code", "none"]
 RERANKER_CHOICES = ["auto", "siliconflow", "cohere", "openai", "cross_encoder", "rule_based", "none"]
 EXPANSION_CHOICES = ["siliconflow", "openai", "none"]
+WEIGHTING_CHOICES = ["siliconflow", "openai", "rule_based", "none"]
 
 # Mapping: embedding backend -> default reranker backend
 _AUTO_RERANKER = {
@@ -50,6 +51,7 @@ def _build_engine_kwargs(
     embedding: str,
     reranker: str,
     expansion: str = "none",
+    weighting: str = "none",
     embedding_base_url: Optional[str] = None,
     embedding_api_key: Optional[str] = None,
     embedding_dim: Optional[int] = None,
@@ -87,10 +89,17 @@ def _build_engine_kwargs(
         from openace.query_expansion import create_query_expander
         expander_obj = create_query_expander(expansion)
 
+    # Resolve signal weighter
+    weighter_obj = None
+    if weighting != "none":
+        from openace.signal_weighting import create_signal_weighter
+        weighter_obj = create_signal_weighter(weighting)
+
     kwargs = {
         "embedding_provider": provider,
         "reranker": reranker_obj,
         "query_expander": expander_obj,
+        "signal_weighter": weighter_obj,
     }
     if provider is not None:
         kwargs["embedding_dim"] = provider.dimension
@@ -157,6 +166,9 @@ def index(path: str, embedding: str, reranker: str, chunk: bool,
               help="Reranker backend (default: auto, matches embedding).")
 @click.option("--expansion", type=click.Choice(EXPANSION_CHOICES), default="none",
               help="Query expansion backend for improved recall.")
+@click.option("--weighting", type=click.Choice(WEIGHTING_CHOICES), default="none",
+              envvar="OPENACE_WEIGHTING",
+              help="Signal weighting backend (default: none).")
 @click.option("--chunk/--no-chunk", default=True,
               help="Enable AST chunk-level search (default: on).")
 @click.option("--limit", "-n", default=10, help="Max results.")
@@ -164,7 +176,7 @@ def index(path: str, embedding: str, reranker: str, chunk: bool,
 @click.option("--file-path", "-f", default=None, help="File path prefix filter.")
 @_provider_options
 def search(query: str, path: str, embedding: str, reranker: str, expansion: str,
-           chunk: bool, limit: int, language: str, file_path: str,
+           weighting: str, chunk: bool, limit: int, language: str, file_path: str,
            embedding_base_url, embedding_api_key, embedding_dim,
            reranker_base_url, reranker_api_key):
     """Search for symbols in an indexed project."""
@@ -173,7 +185,7 @@ def search(query: str, path: str, embedding: str, reranker: str, expansion: str,
 
     project_path = str(Path(path).resolve())
     engine_kwargs = _build_engine_kwargs(
-        embedding, reranker, expansion,
+        embedding, reranker, expansion, weighting,
         embedding_base_url=embedding_base_url,
         embedding_api_key=embedding_api_key,
         embedding_dim=embedding_dim,
@@ -219,10 +231,14 @@ def search(query: str, path: str, embedding: str, reranker: str, expansion: str,
               envvar="OPENACE_RERANKER", help="Reranker backend (default: auto, matches embedding).")
 @click.option("--expansion", type=click.Choice(EXPANSION_CHOICES), default="none",
               envvar="OPENACE_EXPANSION", help="Query expansion backend.")
+@click.option("--weighting", type=click.Choice(WEIGHTING_CHOICES), default="none",
+              envvar="OPENACE_WEIGHTING",
+              help="Signal weighting backend (default: none).")
 @click.option("--chunk/--no-chunk", default=True,
               help="Enable AST chunk-level indexing and search (default: on).")
 @_provider_options
-def serve(path: str, embedding: str, reranker: str, expansion: str, chunk: bool,
+def serve(path: str, embedding: str, reranker: str, expansion: str, weighting: str,
+          chunk: bool,
           embedding_base_url, embedding_api_key, embedding_dim,
           reranker_base_url, reranker_api_key):
     """Start MCP server on stdio."""
@@ -243,7 +259,7 @@ def serve(path: str, embedding: str, reranker: str, expansion: str, chunk: bool,
 
     try:
         engine_kwargs = _build_engine_kwargs(
-            embedding, reranker, expansion,
+            embedding, reranker, expansion, weighting,
             embedding_base_url=embedding_base_url,
             embedding_api_key=embedding_api_key,
             embedding_dim=embedding_dim,

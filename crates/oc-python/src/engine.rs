@@ -122,7 +122,15 @@ impl EngineBinding {
     }
 
     /// Search for symbols using multi-signal retrieval.
-    #[pyo3(signature = (text, query_vector=None, limit=None, language=None, file_path=None, enable_chunk_search=false))]
+    #[pyo3(signature = (
+        text,
+        query_vector=None, limit=None, language=None, file_path=None,
+        enable_chunk_search=false,
+        bm25_weight=1.0, vector_weight=1.0, exact_weight=1.0,
+        chunk_bm25_weight=1.0, graph_weight=1.0,
+        bm25_pool_size=None, vector_pool_size=None, graph_depth=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn search(
         &self,
         py: Python<'_>,
@@ -132,6 +140,14 @@ impl EngineBinding {
         language: Option<&str>,
         file_path: Option<&str>,
         enable_chunk_search: bool,
+        bm25_weight: f64,
+        vector_weight: f64,
+        exact_weight: f64,
+        chunk_bm25_weight: f64,
+        graph_weight: f64,
+        bm25_pool_size: Option<usize>,
+        vector_pool_size: Option<usize>,
+        graph_depth: Option<u32>,
     ) -> PyResult<Vec<PySearchResult>> {
         let text = text.to_string();
         let lang = language.and_then(parse_language);
@@ -153,6 +169,20 @@ impl EngineBinding {
             query.file_path_filter = fp;
             query.query_vector = query_vector;
             query.enable_chunk_search = enable_chunk_search;
+            query.bm25_weight = bm25_weight;
+            query.vector_weight = vector_weight;
+            query.exact_weight = exact_weight;
+            query.chunk_bm25_weight = chunk_bm25_weight;
+            query.graph_weight = graph_weight;
+            if let Some(pool) = bm25_pool_size {
+                query.bm25_pool_size = pool;
+            }
+            if let Some(pool) = vector_pool_size {
+                query.vector_pool_size = pool;
+            }
+            if let Some(depth) = graph_depth {
+                query.graph_depth = depth;
+            }
 
             let engine = RetrievalEngine::new(mgr);
             let results = engine

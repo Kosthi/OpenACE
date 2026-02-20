@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from openace.embedding.protocol import EmbeddingProvider
     from openace.query_expansion import QueryExpander
     from openace.reranking.protocol import Reranker
+    from openace.signal_weighting import SignalWeighter
 
 
 def _convert_symbol(py_sym) -> Symbol:
@@ -120,6 +121,7 @@ class Engine:
         reranker: Optional[Reranker] = None,
         rerank_pool_size: int = 50,
         query_expander: Optional[QueryExpander] = None,
+        signal_weighter: Optional[SignalWeighter] = None,
         chunk_enabled: bool = False,
     ):
         """Initialize the engine.
@@ -132,6 +134,7 @@ class Engine:
             reranker: Optional reranker for two-stage search.
             rerank_pool_size: Number of candidates to retrieve before reranking.
             query_expander: Optional query expander for improved recall.
+            signal_weighter: Optional signal weighter for adaptive RRF fusion.
             chunk_enabled: Enable AST chunk-level indexing and search.
         """
         from openace._openace import EngineBinding
@@ -142,6 +145,7 @@ class Engine:
         self._reranker = reranker
         self._rerank_pool_size = min(rerank_pool_size, 200)
         self._query_expander = query_expander
+        self._signal_weighter = signal_weighter
         self._chunk_enabled = chunk_enabled
         if reranker is not None and rerank_pool_size > 200:
             logger.warning(
@@ -227,6 +231,19 @@ class Engine:
                 vectors = self._embedding_provider.embed([query])
                 query_vector = vectors[0].tolist()
 
+            # Stage 0.5: signal weight generation
+            from openace.signal_weighting import SignalWeights
+
+            weights = SignalWeights()
+            if self._signal_weighter is not None:
+                try:
+                    weights = self._signal_weighter.compute_weights(query)
+                except Exception as e:
+                    logger.warning(
+                        "Signal weighting failed (%s), using defaults",
+                        type(e).__name__,
+                    )
+
             # Stage 1: retrieval with expanded pool
             # Expand when reranker or file-dedup is active so we have
             # enough candidates after filtering.
@@ -243,6 +260,11 @@ class Engine:
                 language,
                 file_path,
                 self._chunk_enabled,
+                bm25_weight=weights.bm25,
+                vector_weight=weights.vector,
+                exact_weight=weights.exact,
+                chunk_bm25_weight=weights.chunk_bm25,
+                graph_weight=weights.graph,
             )
             results = [_convert_search_result(r) for r in py_results]
 
