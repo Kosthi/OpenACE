@@ -322,19 +322,19 @@ class Engine:
             # Stage 4: score-gap cutoff — detect a significant score
             # drop between consecutive results and cut there.  This
             # trims the tail of weakly-matching noise.
-            if len(results) > 3:
+            _MIN_RESULTS = min(limit, 5)
+            if len(results) > _MIN_RESULTS:
                 def _eff_score(r: SearchResult) -> float:
                     return r.rerank_score if r.rerank_score is not None else r.score
 
                 cut_idx = len(results)
-                for idx in range(2, len(results)):
+                for idx in range(_MIN_RESULTS, len(results)):
                     prev = _eff_score(results[idx - 1])
                     cur = _eff_score(results[idx])
                     if prev > 0 and cur / prev < 0.6:
                         cut_idx = idx
                         break
-                # Never cut below 3 results — keep some breadth.
-                results = results[:max(cut_idx, 3)]
+                results = results[:max(cut_idx, _MIN_RESULTS)]
 
             return results[:limit]
         except OpenACEError:
