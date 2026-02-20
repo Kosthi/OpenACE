@@ -9,7 +9,9 @@ import time
 import urllib.request
 from typing import Optional, Protocol
 
-logger = structlog.get_logger(__name__)
+from openace.logging import get_logger
+
+logger = get_logger(__name__)
 
 EXPANSION_PROMPT = """\
 You are a code search query expander. Given a natural language search query about code, \

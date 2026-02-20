@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING, Optional
 import structlog
 
 from openace.exceptions import IndexingError, OpenACEError, SearchError
+from openace.logging import get_logger
 from openace.types import ChunkInfo, IndexReport, SearchResult, Symbol
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 
 # Path segments that indicate a test file
 _TEST_MARKERS = {"test", "tests", "test_", "_test", "spec", "specs", "__tests__"}
@@ -300,6 +301,7 @@ class Engine:
                     trace_id=trace_id,
                 )
                 results = [_convert_search_result(r) for r in py_results]
+                retrieval_count = len(results)
 
                 # Stage 2: rerank if reranker is configured
                 if self._reranker is not None:
@@ -375,6 +377,8 @@ class Engine:
                         + lowval_results
                     )
 
+                deduped_count = len(results)
+
                 # Stage 4: score-gap cutoff — detect a significant score
                 # drop between consecutive results and cut there.  This
                 # trims the tail of weakly-matching noise.
@@ -392,6 +396,13 @@ class Engine:
                             break
                     results = results[:max(cut_idx, _MIN_RESULTS)]
 
+                final_count = min(len(results), limit)
+                logger.info(
+                    "search pipeline done",
+                    retrieval_count=retrieval_count,
+                    deduped_count=deduped_count,
+                    returned_count=final_count,
+                )
                 return results[:limit]
             except OpenACEError:
                 raise

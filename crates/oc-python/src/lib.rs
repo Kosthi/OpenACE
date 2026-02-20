@@ -21,7 +21,13 @@ pub fn init_tracing() {
         use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
         let level_str = std::env::var("OPENACE_LOG_LEVEL").unwrap_or_else(|_| "warn".to_string());
-        let filter = EnvFilter::try_new(&level_str).unwrap_or_else(|_| {
+        // Suppress noisy third-party crate logs (tantivy mmap, hyper, etc.)
+        // while keeping the user's requested level as default.
+        // User can still override with explicit directives, e.g. "tantivy=debug,debug".
+        let filter_str = format!(
+            "tantivy=warn,h2=warn,hyper=warn,reqwest=warn,tungstenite=warn,{level_str}"
+        );
+        let filter = EnvFilter::try_new(&filter_str).unwrap_or_else(|_| {
             eprintln!("openace: invalid OPENACE_LOG_LEVEL={level_str:?}, falling back to \"warn\"");
             EnvFilter::new("warn")
         });

@@ -10,9 +10,10 @@ import structlog
 
 from openace.engine import Engine, _is_test_file, _LOW_VALUE_KINDS
 from openace.exceptions import OpenACEError
+from openace.logging import get_logger
 from openace.types import SearchResult
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 
 
 _GRAPH_ONLY = {"graph"}

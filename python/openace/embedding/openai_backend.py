@@ -8,7 +8,9 @@ from typing import Optional
 
 import structlog
 
-logger = structlog.get_logger(__name__)
+from openace.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class OpenAIEmbedder:
