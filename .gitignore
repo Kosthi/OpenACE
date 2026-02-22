@@ -8,4 +8,7 @@ __pycache__/
 **/.openace/
 eval/output_*/
 eval/repos/
+eval/ace_tool_results.json
+eval/ace_tool_results.metrics.json
+eval/ace_tool_manifest.json
 logs/
