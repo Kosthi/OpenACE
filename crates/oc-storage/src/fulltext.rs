@@ -464,12 +464,7 @@ impl FullTextStore {
             vec![self.f_name, self.f_qualified_name, self.f_content],
         );
 
-        let text_query =
-            query_parser
-                .parse_query(query)
-                .map_err(|e| StorageError::FullTextIndexUnavailable {
-                    reason: format!("query parse error: {e}"),
-                })?;
+        let (text_query, _errors) = query_parser.parse_query_lenient(query);
 
         let final_query: Box<dyn tantivy::query::Query> = {
             let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> =
@@ -585,12 +580,7 @@ impl FullTextStore {
             vec![self.f_name, self.f_qualified_name, self.f_content],
         );
 
-        let text_query =
-            query_parser
-                .parse_query(query)
-                .map_err(|e| StorageError::FullTextIndexUnavailable {
-                    reason: format!("query parse error: {e}"),
-                })?;
+        let (text_query, _errors) = query_parser.parse_query_lenient(query);
 
         let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> =
             vec![(Occur::Must, text_query)];
@@ -1163,5 +1153,54 @@ mod tests {
         let hits = store.search_bm25("检测", 10, None, None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].symbol_id, SymbolId(5000));
+    }
+
+    // --- Lenient query parsing (natural language with special chars) ---
+
+    #[test]
+    fn natural_language_query_does_not_crash() {
+        let mut store = FullTextStore::create_in_ram().unwrap();
+        let sym = make_symbol(6000, "validate_input", "app.validate_input", Language::Python);
+        store
+            .add_document(&sym, Some("def validate_input(data): return bool(data)"))
+            .unwrap();
+        store.commit().unwrap();
+
+        // Queries containing Tantivy DSL special characters should not error
+        let tricky_queries = [
+            "validate (input) data",
+            "how does validate_input work?",
+            r#"fix the "bug" in validate"#,
+            "validate: input -> output",
+            "validate() returns bool(data)",
+            "path/to/file.py:123",
+            "error in `validate_input` function",
+            "validate + input - other",
+            "field~2 boost^3",
+        ];
+
+        for q in &tricky_queries {
+            let result = store.search_bm25(q, 10, None, None);
+            assert!(result.is_ok(), "query {:?} should not error: {:?}", q, result.err());
+        }
+    }
+
+    #[test]
+    fn natural_language_chunk_query_does_not_crash() {
+        let mut store = FullTextStore::create_in_ram().unwrap();
+        let chunk = make_chunk(600, "src/app.py", "App.run", "def run(self): pass");
+        store.add_chunk_document(&chunk).unwrap();
+        store.commit().unwrap();
+
+        let tricky_queries = [
+            "how does App.run() work?",
+            "fix the (bug) in run",
+            r#"the "run" method"#,
+        ];
+
+        for q in &tricky_queries {
+            let result = store.search_bm25_chunks(q, 10, None, None);
+            assert!(result.is_ok(), "chunk query {:?} should not error: {:?}", q, result.err());
+        }
     }
 }
