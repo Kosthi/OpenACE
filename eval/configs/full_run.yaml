@@ -1,0 +1,26 @@
+dataset: princeton-nlp/SWE-bench_Lite
+repos_dir: eval/repos
+output_dir: eval/output
+
+llm:
+  provider: openai
+  model: gpt-4o
+  api_key_env: OPENAI_API_KEY
+  temperature: 0.0
+  max_tokens: 4096
+
+conditions:
+  - condition_id: baseline
+
+  - condition_id: bm25-only
+
+  - condition_id: bm25+vector
+    embedding_backend: local
+
+  - condition_id: full-pipeline
+    embedding_backend: local
+    reranker_backend: rule_based
+
+  - condition_id: full-siliconflow
+    embedding_backend: siliconflow
+    reranker_backend: siliconflow

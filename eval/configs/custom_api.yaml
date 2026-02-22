@@ -1,0 +1,19 @@
+dataset: princeton-nlp/SWE-bench_Lite
+repos_dir: eval/repos
+output_dir: eval/output
+max_instances: 10
+
+llm:
+  provider: openai          # use "openai" for any OpenAI-compatible API
+  model: deepseek-chat
+  api_key_env: DEEPSEEK_API_KEY
+  base_url: https://api.deepseek.com/v1
+  temperature: 0.0
+  max_tokens: 4096
+
+conditions:
+  - condition_id: baseline
+  - condition_id: bm25-only
+  - condition_id: full-pipeline
+    embedding_backend: local
+    reranker_backend: rule_based
