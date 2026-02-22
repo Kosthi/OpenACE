@@ -131,10 +131,11 @@ impl EngineBinding {
     #[pyo3(signature = (
         text,
         query_vector=None, limit=None, language=None, file_path=None,
-        enable_chunk_search=false,
+        enable_chunk_search=true,
         bm25_weight=1.0, vector_weight=1.0, exact_weight=1.0,
         chunk_bm25_weight=1.0, graph_weight=1.0,
         bm25_pool_size=None, vector_pool_size=None, graph_depth=None,
+        bm25_text=None, exact_queries=None,
         trace_id=None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -155,6 +156,8 @@ impl EngineBinding {
         bm25_pool_size: Option<usize>,
         vector_pool_size: Option<usize>,
         graph_depth: Option<u32>,
+        bm25_text: Option<String>,
+        exact_queries: Option<Vec<String>>,
         trace_id: Option<String>,
     ) -> PyResult<Vec<PySearchResult>> {
         let text = text.to_string();
@@ -194,6 +197,10 @@ impl EngineBinding {
             }
             if let Some(depth) = graph_depth {
                 query.graph_depth = depth;
+            }
+            query.bm25_text = bm25_text;
+            if let Some(eq) = exact_queries {
+                query.exact_queries = eq;
             }
 
             let engine = RetrievalEngine::new(mgr);

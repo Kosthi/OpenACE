@@ -36,6 +36,10 @@ pub struct SearchQuery {
     pub chunk_bm25_weight: f64,
     /// Weight multiplier for graph expansion signal (default 1.0).
     pub graph_weight: f64,
+    /// BM25-specific query text; falls back to `text` if None.
+    pub bm25_text: Option<String>,
+    /// Identifiers for exact match signal; falls back to `text` if empty.
+    pub exact_queries: Vec<String>,
 }
 
 impl SearchQuery {
@@ -51,13 +55,15 @@ impl SearchQuery {
             exact_match_pool_size: 50,
             query_vector: None,
             vector_pool_size: 100,
-            enable_chunk_search: false,
+            enable_chunk_search: true,
             chunk_bm25_pool_size: 100,
             bm25_weight: 1.0,
             vector_weight: 1.0,
             exact_weight: 1.0,
             chunk_bm25_weight: 1.0,
             graph_weight: 1.0,
+            bm25_text: None,
+            exact_queries: Vec::new(),
         }
     }
 
@@ -67,6 +73,11 @@ impl SearchQuery {
 
     fn effective_graph_depth(&self) -> u32 {
         self.graph_depth.min(5)
+    }
+
+    /// Return the BM25-specific text, falling back to the generic `text`.
+    pub fn effective_bm25_text(&self) -> &str {
+        self.bm25_text.as_deref().unwrap_or(&self.text)
     }
 }
 
@@ -181,8 +192,9 @@ impl<'a> RetrievalEngine<'a> {
         query: &SearchQuery,
         candidates: &mut HashMap<SymbolId, ScoredCandidate>,
     ) {
+        let bm25_text = query.effective_bm25_text();
         let hits = self.storage.fulltext().search_bm25(
-            &query.text,
+            bm25_text,
             query.bm25_pool_size,
             query.file_path_filter.as_deref(),
             query.language_filter,
@@ -252,6 +264,8 @@ impl<'a> RetrievalEngine<'a> {
     }
 
     /// Exact match signal: query SQLite name and qualified_name columns.
+    /// If `exact_queries` is non-empty, iterate over each identifier;
+    /// otherwise fall back to `text` for backward compatibility.
     fn collect_exact_match(
         &self,
         query: &SearchQuery,
@@ -260,31 +274,39 @@ impl<'a> RetrievalEngine<'a> {
         let mut exact_hits: Vec<CodeSymbol> = Vec::new();
         let mut seen: HashSet<SymbolId> = HashSet::new();
 
-        // Name match
-        match self.storage.graph().get_symbols_by_name(&query.text) {
-            Ok(syms) => {
-                for sym in syms {
-                    if seen.insert(sym.id) {
-                        exact_hits.push(sym);
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(signal = "exact", error = %e, "signal failed on name lookup, skipping");
-            }
-        }
+        let terms: Vec<&str> = if query.exact_queries.is_empty() {
+            vec![&query.text]
+        } else {
+            query.exact_queries.iter().map(|s| s.as_str()).collect()
+        };
 
-        // Qualified name match
-        match self.storage.graph().get_symbols_by_qualified_name(&query.text) {
-            Ok(syms) => {
-                for sym in syms {
-                    if seen.insert(sym.id) {
-                        exact_hits.push(sym);
+        for term in &terms {
+            // Name match
+            match self.storage.graph().get_symbols_by_name(term) {
+                Ok(syms) => {
+                    for sym in syms {
+                        if seen.insert(sym.id) {
+                            exact_hits.push(sym);
+                        }
                     }
                 }
+                Err(e) => {
+                    tracing::warn!(signal = "exact", error = %e, "signal failed on name lookup, skipping");
+                }
             }
-            Err(e) => {
-                tracing::warn!(signal = "exact", error = %e, "signal failed on qualified name lookup, skipping");
+
+            // Qualified name match
+            match self.storage.graph().get_symbols_by_qualified_name(term) {
+                Ok(syms) => {
+                    for sym in syms {
+                        if seen.insert(sym.id) {
+                            exact_hits.push(sym);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(signal = "exact", error = %e, "signal failed on qualified name lookup, skipping");
+                }
             }
         }
 
@@ -330,8 +352,9 @@ impl<'a> RetrievalEngine<'a> {
         query: &SearchQuery,
         candidates: &mut HashMap<SymbolId, ScoredCandidate>,
     ) {
+        let bm25_text = query.effective_bm25_text();
         let hits = self.storage.fulltext().search_bm25_chunks(
-            &query.text,
+            bm25_text,
             query.chunk_bm25_pool_size,
             query.file_path_filter.as_deref(),
             query.language_filter,
@@ -754,13 +777,15 @@ mod tests {
         assert_eq!(q.exact_match_pool_size, 50);
         assert!(q.query_vector.is_none());
         assert_eq!(q.vector_pool_size, 100);
-        assert!(!q.enable_chunk_search);
+        assert!(q.enable_chunk_search);
         assert_eq!(q.chunk_bm25_pool_size, 100);
         assert!((q.bm25_weight - 1.0).abs() < f64::EPSILON);
         assert!((q.vector_weight - 1.0).abs() < f64::EPSILON);
         assert!((q.exact_weight - 1.0).abs() < f64::EPSILON);
         assert!((q.chunk_bm25_weight - 1.0).abs() < f64::EPSILON);
         assert!((q.graph_weight - 1.0).abs() < f64::EPSILON);
+        assert!(q.bm25_text.is_none());
+        assert!(q.exact_queries.is_empty());
     }
 
     #[test]
@@ -994,5 +1019,104 @@ mod tests {
         // Should still get BM25/exact results, no panic from empty vector store
         assert!(!results.is_empty());
         assert!(!results[0].match_signals.contains(&"vector".to_string()));
+    }
+
+    // --- Tests for bm25_text and exact_queries fields ---
+
+    #[test]
+    fn effective_bm25_text_fallback() {
+        let q = SearchQuery::new("original text");
+        assert_eq!(q.effective_bm25_text(), "original text");
+    }
+
+    #[test]
+    fn effective_bm25_text_override() {
+        let mut q = SearchQuery::new("original text");
+        q.bm25_text = Some("override text".to_string());
+        assert_eq!(q.effective_bm25_text(), "override text");
+    }
+
+    #[test]
+    fn bm25_text_override_in_search() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage(&tmp);
+
+        // sym_a has "alpha" in its body, sym_b has "beta"
+        let sym_a = make_symbol("alpha_func", "alpha_func", "src/alpha.py", 0, 100, Language::Python);
+        let sym_b = make_symbol("beta_func", "beta_func", "src/beta.py", 0, 100, Language::Python);
+
+        mgr.graph_mut().insert_symbols(&[sym_a.clone(), sym_b.clone()], 1000).unwrap();
+        mgr.fulltext_mut().add_document(&sym_a, Some("def alpha_func(): alpha alpha alpha")).unwrap();
+        mgr.fulltext_mut().add_document(&sym_b, Some("def beta_func(): beta beta beta")).unwrap();
+        mgr.fulltext_mut().commit().unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+
+        // text is "zzz_no_match" but bm25_text overrides to "alpha"
+        let mut query = SearchQuery::new("zzz_no_match");
+        query.bm25_text = Some("alpha".to_string());
+        query.enable_graph_expansion = false;
+        let results = engine.search(&query).unwrap();
+
+        // Should find alpha_func via BM25 using the override text
+        assert!(!results.is_empty());
+        let alpha_hit = results.iter().find(|r| r.name == "alpha_func");
+        assert!(alpha_hit.is_some(), "alpha_func should be found via bm25_text override");
+        assert!(alpha_hit.unwrap().match_signals.contains(&"bm25".to_string()));
+    }
+
+    #[test]
+    fn exact_match_with_multiple_queries() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage(&tmp);
+
+        let sym_a = make_symbol("FooClass", "module.FooClass", "src/foo.py", 0, 100, Language::Python);
+        let sym_b = make_symbol("bar_func", "module.bar_func", "src/bar.py", 0, 100, Language::Python);
+        let sym_c = make_symbol("unrelated", "module.unrelated", "src/other.py", 0, 100, Language::Python);
+
+        mgr.graph_mut().insert_symbols(&[sym_a.clone(), sym_b.clone(), sym_c.clone()], 1000).unwrap();
+        // No fulltext docs — we only care about the exact match signal
+        mgr.fulltext_mut().commit().unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+
+        // exact_queries targets two specific identifiers
+        let mut query = SearchQuery::new("some long problem statement that won't match anything");
+        query.exact_queries = vec!["FooClass".to_string(), "bar_func".to_string()];
+        query.enable_graph_expansion = false;
+        let results = engine.search(&query).unwrap();
+
+        let ids: Vec<&str> = results.iter().map(|r| r.name.as_str()).collect();
+        assert!(ids.contains(&"FooClass"), "FooClass should be found via exact_queries");
+        assert!(ids.contains(&"bar_func"), "bar_func should be found via exact_queries");
+        assert!(!ids.contains(&"unrelated"), "unrelated should not appear");
+
+        // Both should have the "exact" signal
+        for r in &results {
+            if r.name == "FooClass" || r.name == "bar_func" {
+                assert!(r.match_signals.contains(&"exact".to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn exact_queries_empty_falls_back_to_text() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage(&tmp);
+
+        let sym = make_symbol("target_fn", "target_fn", "src/main.py", 0, 100, Language::Python);
+        mgr.graph_mut().insert_symbols(&[sym.clone()], 1000).unwrap();
+        mgr.fulltext_mut().commit().unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+
+        // exact_queries is empty, so text is used for exact match (backward compat)
+        let mut query = SearchQuery::new("target_fn");
+        query.enable_graph_expansion = false;
+        let results = engine.search(&query).unwrap();
+
+        assert!(!results.is_empty());
+        assert_eq!(results[0].name, "target_fn");
+        assert!(results[0].match_signals.contains(&"exact".to_string()));
     }
 }

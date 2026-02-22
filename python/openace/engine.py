@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -31,6 +32,68 @@ _LOW_VALUE_KINDS = {"constant", "variable", "module"}
 
 # Module init files are usually re-exports, rarely implementation.
 _INIT_FILE = "__init__.py"
+
+# Maximum number of extracted identifiers to pass to exact match.
+_MAX_IDENTIFIERS = 20
+
+# Precompiled patterns for identifier extraction.
+_RE_CAMELCASE = re.compile(r'\b([A-Z][a-z]+(?:[A-Z][a-zA-Z0-9]*)+)\b')
+_RE_ACRONYM_CAMELCASE = re.compile(r'\b([A-Z]{2,}[a-z][a-zA-Z0-9]*)\b')
+_RE_SNAKE_CASE = re.compile(r'\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b')
+_RE_DOTTED = re.compile(r'\b([\w]+(?:\.[\w]+)+)\b')
+_RE_FILE_PATH = re.compile(r'([\w/\\]+\.(?:py|js|ts|rs|go|java))\b')
+_RE_ALL_CAPS = re.compile(r'\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b')
+# Single PascalCase word with digits (e.g., L031, Rule4) — at least one letter
+_RE_PASCAL_SINGLE = re.compile(r'\b([A-Z][a-zA-Z0-9]*\d[a-zA-Z0-9]*)\b')
+
+
+def _extract_identifiers(text: str) -> list[str]:
+    """Extract code identifiers from a natural-language query.
+
+    Returns a deduplicated list of identifiers (capped at _MAX_IDENTIFIERS)
+    suitable for exact-match symbol lookup. Zero-cost on pure natural
+    language input that contains no code references.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+
+    def _add(ident: str) -> None:
+        if ident and ident not in seen and len(result) < _MAX_IDENTIFIERS:
+            seen.add(ident)
+            result.append(ident)
+
+    # CamelCase with at least one internal uppercase: DataProcessor, RuleValidator
+    for m in _RE_CAMELCASE.findall(text):
+        _add(m)
+
+    # Acronym-prefixed CamelCase: HTMLParser, XMLReader, JSONParser
+    for m in _RE_ACRONYM_CAMELCASE.findall(text):
+        _add(m)
+
+    # PascalCase with digits: L031, Rule4
+    for m in _RE_PASCAL_SINGLE.findall(text):
+        _add(m)
+
+    # snake_case: process_data, validate_input (require at least one underscore)
+    for m in _RE_SNAKE_CASE.findall(text):
+        _add(m)
+
+    # Dotted references: module.Class.method — also extract last component
+    for m in _RE_DOTTED.findall(text):
+        _add(m)
+        last = m.rsplit(".", 1)[-1]
+        _add(last)
+
+    # File path stems: L031 from L031.py, handler from handler.py
+    for m in _RE_FILE_PATH.findall(text):
+        stem = Path(m).stem
+        _add(stem)
+
+    # ALL_CAPS constants: MAX_RETRIES, DEFAULT_TIMEOUT
+    for m in _RE_ALL_CAPS.findall(text):
+        _add(m)
+
+    return result
 
 
 def _is_test_file(file_path: str) -> bool:
@@ -263,6 +326,16 @@ class Engine:
                     vectors = self._embedding_provider.embed([query])
                     query_vector = vectors[0].tolist()
 
+                # Stage 0.1: extract identifiers from the ORIGINAL query
+                # for exact-match and BM25 boosting.
+                extracted_ids = _extract_identifiers(query)
+                bm25_text = (
+                    " ".join(extracted_ids) + " " + search_query
+                    if extracted_ids
+                    else None
+                )
+                exact_queries = extracted_ids if extracted_ids else None
+
                 # Stage 0.5: signal weight generation
                 from openace.signal_weighting import SignalWeights
 
@@ -298,6 +371,8 @@ class Engine:
                     exact_weight=weights.exact,
                     chunk_bm25_weight=weights.chunk_bm25,
                     graph_weight=weights.graph,
+                    bm25_text=bm25_text,
+                    exact_queries=exact_queries,
                     trace_id=trace_id,
                 )
                 results = [_convert_search_result(r) for r in py_results]
