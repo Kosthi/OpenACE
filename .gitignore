@@ -6,3 +6,6 @@ __pycache__/
 *.pyc
 **/.DS_Store
 **/.openace/
+eval/output_*/
+eval/repos/
+logs/
