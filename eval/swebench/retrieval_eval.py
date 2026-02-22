@@ -18,6 +18,7 @@ from eval.swebench.config import ExperimentCondition
 from eval.swebench.context_retrieval import _dedupe_by_symbol_id, generate_queries
 from eval.swebench.dataset import SWEInstance, load_dataset
 from eval.swebench.repo_manager import clone_or_reuse
+from openace.search_utils import _aggregate_by_file, _apply_file_score_gap
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +204,8 @@ def evaluate_retrieval_single(
     all_results = []
     for q in queries:
         try:
-            results = engine.search(q, limit=search_limit)
+            pool_size = min(search_limit * 5, 200)
+            results = engine.search(q, limit=pool_size, dedupe_by_file=False)
             all_results.extend(results)
         except Exception:
             logger.warning("Search failed for query: %s", q, exc_info=True)
@@ -211,25 +213,22 @@ def evaluate_retrieval_single(
     unique_results = _dedupe_by_symbol_id(all_results)
     search_time = time.monotonic() - t1
 
-    # Extract retrieved file paths (unique, ordered by first appearance at
-    # highest score)
-    retrieved_files: list[str] = []
-    seen_files: set[str] = set()
-    for r in unique_results:
-        fp = r.file_path
-        if fp not in seen_files:
-            seen_files.add(fp)
-            retrieved_files.append(fp)
+    # MCP-style aggregation: group by file + score gap truncation
+    file_groups = _aggregate_by_file(unique_results)
+    file_groups = _apply_file_score_gap(file_groups)
+    file_groups = file_groups[:search_limit]
 
-    # Extract retrieved function/method names
+    # Extract file list (already sorted by tier + score)
+    retrieved_files = [g["file_path"] for g in file_groups]
+
+    # Extract function/method names (file-group order, within-file by score)
     retrieved_functions: list[str] = []
     seen_funcs: set[str] = set()
-    for r in unique_results:
-        if r.kind in ("function", "method"):
-            name = r.name
-            if name not in seen_funcs:
-                seen_funcs.add(name)
-                retrieved_functions.append(name)
+    for group in file_groups:
+        for r in group["symbols"]:
+            if r.kind in ("function", "method") and r.name not in seen_funcs:
+                seen_funcs.add(r.name)
+                retrieved_functions.append(r.name)
 
     return InstanceMetrics(
         instance_id=instance.instance_id,

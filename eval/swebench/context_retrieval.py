@@ -64,7 +64,6 @@ def retrieve_context(
             results = engine.search(
                 q,
                 limit=condition.search_limit,
-                dedupe_by_file=condition.dedupe_by_file,
             )
             all_results.extend(results)
         except Exception:

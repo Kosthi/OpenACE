@@ -15,7 +15,6 @@ class ExperimentCondition:
     embedding_backend: Optional[str] = None
     reranker_backend: Optional[str] = None
     search_limit: int = 20
-    dedupe_by_file: bool = True
 
     @property
     def is_baseline(self) -> bool:
@@ -129,7 +128,6 @@ def load_config_from_yaml(path: str | Path) -> EvalConfig:
                 embedding_backend=c.get("embedding_backend"),
                 reranker_backend=c.get("reranker_backend"),
                 search_limit=c.get("search_limit", 20),
-                dedupe_by_file=c.get("dedupe_by_file", True),
             )
         )
 
