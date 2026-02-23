@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 
 use oc_core::{CodeRelation, CodeSymbol, RelationKind, SymbolKind};
-use oc_indexer::IndexReport;
+use oc_indexer::{IndexReport, IncrementalIndexResult};
 use oc_retrieval::{ChunkInfo, SearchResult};
 
 /// Python-compatible symbol representation.
@@ -213,6 +213,79 @@ impl From<IndexReport> for PyIndexReport {
             total_relations: r.total_relations,
             total_chunks: r.total_chunks,
             duration_secs: r.duration.as_secs_f64(),
+        }
+    }
+}
+
+/// Python-compatible incremental index result.
+#[pyclass(frozen)]
+#[derive(Clone)]
+pub struct PyIncrementalIndexResult {
+    #[pyo3(get)]
+    pub total_files_scanned: usize,
+    #[pyo3(get)]
+    pub files_indexed: usize,
+    #[pyo3(get)]
+    pub files_unchanged: usize,
+    #[pyo3(get)]
+    pub files_deleted: usize,
+    #[pyo3(get)]
+    pub files_skipped: usize,
+    #[pyo3(get)]
+    pub files_failed: usize,
+    #[pyo3(get)]
+    pub total_symbols: usize,
+    #[pyo3(get)]
+    pub total_relations: usize,
+    #[pyo3(get)]
+    pub total_chunks: usize,
+    #[pyo3(get)]
+    pub duration_secs: f64,
+    #[pyo3(get)]
+    pub changed_symbol_ids: Vec<String>,
+    #[pyo3(get)]
+    pub removed_symbol_ids: Vec<String>,
+    #[pyo3(get)]
+    pub fell_back_to_full: bool,
+}
+
+#[pymethods]
+impl PyIncrementalIndexResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "IncrementalIndexResult(indexed={}, unchanged={}, deleted={}, \
+             changed_symbols={}, removed_symbols={}, fell_back={})",
+            self.files_indexed, self.files_unchanged, self.files_deleted,
+            self.changed_symbol_ids.len(), self.removed_symbol_ids.len(),
+            self.fell_back_to_full
+        )
+    }
+}
+
+impl From<IncrementalIndexResult> for PyIncrementalIndexResult {
+    fn from(r: IncrementalIndexResult) -> Self {
+        Self {
+            total_files_scanned: r.report.total_files_scanned,
+            files_indexed: r.report.files_indexed,
+            files_unchanged: r.files_unchanged,
+            files_deleted: r.files_deleted,
+            files_skipped: r.report.total_skipped(),
+            files_failed: r.report.files_failed,
+            total_symbols: r.report.total_symbols,
+            total_relations: r.report.total_relations,
+            total_chunks: r.report.total_chunks,
+            duration_secs: r.report.duration.as_secs_f64(),
+            changed_symbol_ids: r
+                .changed_symbol_ids
+                .iter()
+                .map(|id| format!("{}", id))
+                .collect(),
+            removed_symbol_ids: r
+                .removed_symbol_ids
+                .iter()
+                .map(|id| format!("{}", id))
+                .collect(),
+            fell_back_to_full: r.fell_back_to_full,
         }
     }
 }

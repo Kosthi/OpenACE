@@ -12,7 +12,7 @@ import structlog
 
 from openace.exceptions import IndexingError, OpenACEError, SearchError
 from openace.logging import get_logger
-from openace.types import ChunkInfo, IndexReport, SearchResult, Symbol
+from openace.types import ChunkInfo, IncrementalIndexReport, IndexReport, SearchResult, Symbol
 
 logger = get_logger(__name__)
 
@@ -230,11 +230,14 @@ class Engine:
         """The absolute path to the project root."""
         return self._project_root
 
-    def index(self, *, incremental: bool = True, trace_id: Optional[str] = None) -> IndexReport:
+    def index(self, *, incremental: bool = True, force_full: bool = False,
+              trace_id: Optional[str] = None) -> IndexReport:
         """Run indexing on the project.
 
         Args:
-            incremental: Currently ignored (always full index).
+            incremental: If True (default), use incremental indexing which
+                only re-parses and re-embeds changed files.
+            force_full: If True, always do a full reindex (clears all data).
             trace_id: Optional trace ID for correlation.
 
         Returns:
@@ -242,33 +245,129 @@ class Engine:
         """
         trace_id = trace_id or uuid.uuid4().hex[:16]
         with structlog.contextvars.bound_contextvars(trace_id=trace_id):
-            try:
-                py_report = self._core.index_full(
-                    self._project_root, self._chunk_enabled, trace_id=trace_id
-                )
-                report = _convert_index_report(py_report)
-            except Exception as e:
-                raise IndexingError(f"indexing failed: {e}") from e
+            if force_full or not incremental:
+                return self._index_full(trace_id=trace_id)
+            else:
+                return self._index_incremental(trace_id=trace_id)
 
-            # Auto-embed if provider is set
-            if self._embedding_provider is not None:
+    def _index_full(self, *, trace_id: str) -> IndexReport:
+        """Run full indexing pipeline (clears all data first)."""
+        try:
+            py_report = self._core.index_full(
+                self._project_root, self._chunk_enabled, trace_id=trace_id
+            )
+            report = _convert_index_report(py_report)
+        except Exception as e:
+            raise IndexingError(f"indexing failed: {e}") from e
+
+        # Auto-embed if provider is set
+        if self._embedding_provider is not None:
+            self.embed_all(trace_id=trace_id)
+
+        # Generate file-level summaries
+        self._generate_summaries()
+
+        return report
+
+    def _index_incremental(self, *, trace_id: str) -> IndexReport:
+        """Run incremental indexing pipeline (only process changed files)."""
+        try:
+            py_result = self._core.index_incremental(
+                self._project_root, self._chunk_enabled, trace_id=trace_id
+            )
+        except Exception as e:
+            raise IndexingError(f"incremental indexing failed: {e}") from e
+
+        report = IndexReport(
+            total_files_scanned=py_result.total_files_scanned,
+            files_indexed=py_result.files_indexed,
+            files_skipped=py_result.files_skipped,
+            files_failed=py_result.files_failed,
+            total_symbols=py_result.total_symbols,
+            total_relations=py_result.total_relations,
+            duration_secs=py_result.duration_secs,
+            total_chunks=py_result.total_chunks,
+        )
+
+        # Selective embedding based on what changed
+        if self._embedding_provider is not None:
+            if py_result.fell_back_to_full:
+                logger.info("first run, embedding all symbols")
                 self.embed_all(trace_id=trace_id)
+            elif py_result.changed_symbol_ids:
+                changed_count = len(py_result.changed_symbol_ids)
+                logger.info("embedding changed symbols", count=changed_count)
+                self._embed_changed(
+                    list(py_result.changed_symbol_ids), trace_id=trace_id
+                )
+            else:
+                logger.info("no symbols changed, skipping embedding")
 
-            # Generate file-level summaries
-            if self._summary_enabled:
-                try:
-                    from openace.summary import RuleBasedSummaryGenerator, generate_file_summaries
-                    generator = RuleBasedSummaryGenerator()
-                    summary_count = generate_file_summaries(self._core, generator)
-                    logger.info("generated file summaries", count=summary_count)
-                except Exception as e:
-                    logger.warning(
-                        "summary generation failed",
-                        exception_type=type(e).__name__,
-                        error=str(e),
-                    )
+        # Generate file-level summaries
+        self._generate_summaries()
 
-            return report
+        return report
+
+    def _generate_summaries(self) -> None:
+        """Generate file-level summaries if enabled."""
+        if not self._summary_enabled:
+            return
+        try:
+            from openace.summary import RuleBasedSummaryGenerator, generate_file_summaries
+            generator = RuleBasedSummaryGenerator()
+            summary_count = generate_file_summaries(self._core, generator)
+            logger.info("generated file summaries", count=summary_count)
+        except Exception as e:
+            logger.warning(
+                "summary generation failed",
+                exception_type=type(e).__name__,
+                error=str(e),
+            )
+
+    def _embed_changed(
+        self, symbol_ids: list[str], *, trace_id: Optional[str] = None
+    ) -> int:
+        """Embed only the specified symbols by ID.
+
+        Args:
+            symbol_ids: List of hex symbol ID strings to embed.
+            trace_id: Optional trace ID for correlation.
+
+        Returns:
+            Number of symbols embedded.
+        """
+        if self._embedding_provider is None:
+            return 0
+
+        batch_size = 100
+        total = 0
+        for i in range(0, len(symbol_ids), batch_size):
+            batch_ids = symbol_ids[i : i + batch_size]
+            symbols = self._core.get_symbols_by_ids(batch_ids)
+            if not symbols:
+                continue
+
+            texts = []
+            ids = []
+            for sym in symbols:
+                parts = [sym.qualified_name]
+                if sym.signature:
+                    parts.append(sym.signature)
+                if sym.doc_comment:
+                    parts.append(sym.doc_comment)
+                if sym.body_text:
+                    parts.append(sym.body_text[:32768])
+                texts.append(" ".join(parts))
+                ids.append(sym.id)
+
+            vectors = self._embedding_provider.embed(texts)
+            vector_lists = [v.tolist() for v in vectors]
+            self._core.add_vectors(ids, vector_lists)
+            total += len(symbols)
+
+        self._core.flush()
+        logger.info("embedded changed symbols", total=total)
+        return total
 
     def _validate_path(self, path: str) -> None:
         """Validate that a relative path stays within the project root."""

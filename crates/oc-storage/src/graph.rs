@@ -280,6 +280,39 @@ impl GraphStore {
         Ok(count as usize)
     }
 
+    /// Query symbols by a batch of IDs.
+    ///
+    /// Returns symbols in arbitrary order. IDs not found are silently skipped.
+    pub fn get_symbols_by_ids(&self, ids: &[SymbolId]) -> Result<Vec<CodeSymbol>, StorageError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results = Vec::with_capacity(ids.len());
+        // Process in chunks to avoid exceeding SQLite variable limits
+        for chunk in ids.chunks(500) {
+            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+            let sql = format!(
+                "SELECT id, name, qualified_name, kind, language, file_path, \
+                 line_start, line_end, byte_start, byte_end, \
+                 signature, doc_comment, body_hash, body_text \
+                 FROM symbols WHERE id IN ({})",
+                placeholders.join(", ")
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+
+            let params: Vec<Vec<u8>> = chunk.iter().map(|id| id.as_bytes().to_vec()).collect();
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+
+            let mut rows = stmt.query(param_refs.as_slice())?;
+            while let Some(row) = rows.next()? {
+                results.push(row_to_symbol(row)?);
+            }
+        }
+        Ok(results)
+    }
+
     /// Delete a symbol by ID. Relations are cascaded via ON DELETE CASCADE.
     pub fn delete_symbol(&mut self, id: SymbolId) -> Result<bool, StorageError> {
         let affected = self.conn.execute(

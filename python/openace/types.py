@@ -86,3 +86,29 @@ class Relation:
     file_path: str
     line: int
     confidence: float
+
+
+@dataclass(frozen=True)
+class IncrementalIndexReport:
+    """Report from an incremental indexing run."""
+    total_files_scanned: int
+    files_indexed: int
+    files_unchanged: int
+    files_deleted: int
+    files_skipped: int
+    files_failed: int
+    total_symbols: int
+    total_relations: int
+    total_chunks: int
+    duration_secs: float
+    changed_symbol_ids: list[str] = field(default_factory=list)
+    removed_symbol_ids: list[str] = field(default_factory=list)
+    fell_back_to_full: bool = False
+
+    def __repr__(self) -> str:
+        return (
+            f"IncrementalIndexReport(indexed={self.files_indexed}, "
+            f"unchanged={self.files_unchanged}, deleted={self.files_deleted}, "
+            f"changed_symbols={len(self.changed_symbol_ids)}, "
+            f"fell_back={self.fell_back_to_full})"
+        )

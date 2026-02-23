@@ -10,7 +10,7 @@ pub use incremental::{
     IncrementalReport, SymbolDiff,
 };
 pub use oc_parser::{ChunkConfig, chunk_file};
-pub use pipeline::index;
+pub use pipeline::{index, index_incremental, IncrementalIndexResult};
 pub use report::{IndexConfig, IndexReport, SkipReason};
 pub use scanner::scan_files;
 pub use watcher::{start_watching, ChangeEvent, WatcherHandle};

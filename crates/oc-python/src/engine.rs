@@ -9,7 +9,7 @@ use oc_indexer::IndexConfig;
 use oc_retrieval::engine::{RetrievalEngine, SearchQuery};
 use oc_storage::manager::StorageManager;
 
-use crate::types::{PyChunkData, PyFileInfo, PyIndexReport, PySearchResult, PySummaryChunk, PySymbol};
+use crate::types::{PyChunkData, PyFileInfo, PyIncrementalIndexResult, PyIndexReport, PySearchResult, PySummaryChunk, PySymbol};
 
 /// Parse a 32-hex-char string into a SymbolId.
 fn parse_symbol_id(hex: &str) -> PyResult<SymbolId> {
@@ -124,6 +124,99 @@ impl EngineBinding {
             }
 
             result
+        })
+    }
+
+    /// Run incremental indexing pipeline on the project.
+    ///
+    /// On first run (empty DB), falls back to full index.
+    /// On subsequent runs, only re-parses changed files.
+    /// Returns changed/removed symbol IDs for selective re-embedding.
+    #[pyo3(signature = (repo_root, chunk_enabled=false, trace_id=None))]
+    fn index_incremental(
+        &self,
+        py: Python<'_>,
+        repo_root: &str,
+        chunk_enabled: bool,
+        trace_id: Option<String>,
+    ) -> PyResult<PyIncrementalIndexResult> {
+        let path = PathBuf::from(repo_root);
+        let repo_id = self.repo_id.clone();
+        let project_root = self.project_root.clone();
+        let dim = self.embedding_dim;
+        let inner = Arc::clone(&self.inner);
+
+        py.allow_threads(move || {
+            let _span = tracing::info_span!(
+                "engine.index_incremental",
+                trace_id = %trace_id.as_deref().unwrap_or("")
+            )
+            .entered();
+
+            // Drop the existing StorageManager to release the Tantivy lock
+            {
+                let mut locked = lock_inner(&inner)?;
+                *locked = None;
+            }
+
+            let config = IndexConfig {
+                repo_id,
+                batch_size: 1000,
+                embedding_dim: dim,
+                chunk_enabled,
+                ..Default::default()
+            };
+            let result = oc_indexer::index_incremental(&path, &config)
+                .map(PyIncrementalIndexResult::from)
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!("incremental indexing failed: {e}"))
+                });
+
+            // Re-open StorageManager so queries use fresh data
+            let fresh_mgr = StorageManager::open_with_dimension(&project_root, dim)
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!("failed to reopen storage: {e}"))
+                })?;
+            {
+                let mut locked = lock_inner(&inner)?;
+                *locked = Some(fresh_mgr);
+            }
+
+            result
+        })
+    }
+
+    /// Get symbols by their hex IDs.
+    ///
+    /// Used by the Python layer to fetch symbol data for selective embedding.
+    fn get_symbols_by_ids(
+        &self,
+        py: Python<'_>,
+        ids: Vec<String>,
+    ) -> PyResult<Vec<PySymbol>> {
+        let inner = Arc::clone(&self.inner);
+
+        py.allow_threads(move || {
+            let locked = lock_inner(&inner)?;
+            let mgr = locked
+                .as_ref()
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err("storage unavailable (indexing in progress)")
+                })?;
+
+            let symbol_ids: Vec<SymbolId> = ids
+                .iter()
+                .map(|hex| parse_symbol_id(hex))
+                .collect::<PyResult<Vec<_>>>()?;
+
+            let symbols = mgr
+                .graph()
+                .get_symbols_by_ids(&symbol_ids)
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!("get_symbols_by_ids failed: {e}"))
+                })?;
+
+            Ok(symbols.into_iter().map(PySymbol::from).collect())
         })
     }
 

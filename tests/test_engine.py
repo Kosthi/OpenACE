@@ -32,8 +32,8 @@ class TestEngineIndex:
         report1 = engine.index()
         report2 = engine.index()
 
-        # Second index should produce similar results
-        assert report2.files_indexed == report1.files_indexed
+        # Second index uses incremental path: no files changed → files_indexed=0
+        # but total_symbols should remain the same
         assert report2.total_symbols == report1.total_symbols
 
 
@@ -120,3 +120,87 @@ class TestEngineFlush:
         engine = Engine(str(sample_project))
         engine.index()
         engine.flush()  # Should not raise
+
+
+class TestEngineIncrementalIndex:
+    def test_incremental_first_run_falls_back_to_full(self, sample_project):
+        """First run on a fresh project should fall back to full index."""
+        engine = Engine(str(sample_project))
+        report = engine.index(incremental=True)
+
+        assert isinstance(report, IndexReport)
+        assert report.files_indexed >= 2
+        assert report.total_symbols > 0
+
+    def test_incremental_no_changes(self, sample_project):
+        """Second run with no changes should index zero files."""
+        engine = Engine(str(sample_project))
+        report1 = engine.index(incremental=True)
+
+        # Second run — nothing changed
+        report2 = engine.index(incremental=True)
+        assert report2.files_indexed == 0
+        # Total symbols should still be the same (from storage)
+        assert report2.total_symbols == report1.total_symbols
+
+    def test_incremental_after_file_modification(self, sample_project):
+        """Modifying a file should re-index only that file."""
+        engine = Engine(str(sample_project))
+        engine.index(incremental=True)
+
+        # Modify a file
+        main_py = sample_project / "src" / "main.py"
+        content = main_py.read_text()
+        main_py.write_text(content + "\ndef new_function():\n    pass\n")
+
+        report = engine.index(incremental=True)
+        assert report.files_indexed == 1  # Only the modified file
+
+        # The new function should be findable
+        symbols = engine.find_symbol("new_function")
+        assert len(symbols) > 0
+        assert any(s.name == "new_function" for s in symbols)
+
+    def test_incremental_after_file_deletion(self, sample_project):
+        """Deleting a file should remove its symbols."""
+        engine = Engine(str(sample_project))
+        engine.index(incremental=True)
+
+        # Verify utils.py symbols exist
+        symbols = engine.find_symbol("format_output")
+        assert len(symbols) > 0
+
+        # Delete utils.py
+        (sample_project / "src" / "utils.py").unlink()
+
+        report = engine.index(incremental=True)
+        # The deleted file's symbols should be gone
+        symbols = engine.find_symbol("format_output")
+        assert len(symbols) == 0
+
+    def test_incremental_after_file_addition(self, sample_project):
+        """Adding a new file should index it."""
+        engine = Engine(str(sample_project))
+        engine.index(incremental=True)
+
+        # Add a new file
+        (sample_project / "src" / "new_module.py").write_text(
+            'def brand_new_func():\n'
+            '    """A brand new function."""\n'
+            '    return 42\n'
+        )
+
+        report = engine.index(incremental=True)
+        assert report.files_indexed >= 1
+
+        symbols = engine.find_symbol("brand_new_func")
+        assert len(symbols) > 0
+
+    def test_force_full_overrides_incremental(self, sample_project):
+        """force_full=True should always do a full reindex."""
+        engine = Engine(str(sample_project))
+        engine.index(incremental=True)
+
+        # Force full should reindex everything
+        report = engine.index(force_full=True)
+        assert report.files_indexed >= 2

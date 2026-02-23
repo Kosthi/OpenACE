@@ -84,6 +84,10 @@ pub struct IncrementalReport {
     pub modified: usize,
     pub unchanged: usize,
     pub skipped_unchanged_hash: bool,
+    /// Symbol IDs that were added or modified (need re-embedding).
+    pub changed_ids: Vec<SymbolId>,
+    /// Symbol IDs that were removed (need vector cleanup).
+    pub removed_ids: Vec<SymbolId>,
 }
 
 /// Process a single file change incrementally.
@@ -149,6 +153,8 @@ pub fn update_file(
                 modified: 0,
                 unchanged: 0,
                 skipped_unchanged_hash: true,
+                changed_ids: vec![],
+                removed_ids: vec![],
             });
         }
     }
@@ -219,6 +225,13 @@ pub fn update_file(
         modified: diff.modified.len(),
         unchanged: diff.unchanged_count,
         skipped_unchanged_hash: false,
+        changed_ids: diff
+            .added
+            .iter()
+            .map(|s| s.id)
+            .chain(diff.modified.iter().map(|s| s.id))
+            .collect(),
+        removed_ids: diff.removed.clone(),
     };
 
     // Phase 1: SQLite updates (source of truth)
@@ -379,6 +392,8 @@ pub fn delete_file(
         modified: 0,
         unchanged: 0,
         skipped_unchanged_hash: false,
+        changed_ids: vec![],
+        removed_ids: old_symbols.iter().map(|s| s.id).collect(),
     })
 }
 

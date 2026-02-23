@@ -7,7 +7,7 @@ mod types;
 mod watcher;
 
 use engine::EngineBinding;
-use types::{PyChunkData, PyChunkInfo, PyFileInfo, PyIndexReport, PyRelation, PySearchResult, PySummaryChunk, PySymbol};
+use types::{PyChunkData, PyChunkInfo, PyFileInfo, PyIncrementalIndexResult, PyIndexReport, PyRelation, PySearchResult, PySummaryChunk, PySymbol};
 use watcher::WatcherBinding;
 
 /// Initialize the global tracing subscriber (idempotent).
@@ -67,6 +67,7 @@ fn openace_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySymbol>()?;
     m.add_class::<PySearchResult>()?;
     m.add_class::<PyIndexReport>()?;
+    m.add_class::<PyIncrementalIndexResult>()?;
     m.add_class::<PyRelation>()?;
     m.add_class::<PyChunkInfo>()?;
     m.add_class::<PyChunkData>()?;
