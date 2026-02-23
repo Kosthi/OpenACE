@@ -8,6 +8,102 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Extensions considered source code — everything else gets stripped.
+_SOURCE_EXTENSIONS: set[str] = {
+    # Python
+    ".py", ".pyx", ".pxd",
+    # JavaScript / TypeScript
+    ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    # Rust
+    ".rs",
+    # Go
+    ".go",
+    # Java / Kotlin / Scala
+    ".java", ".kt", ".kts", ".scala",
+    # C / C++
+    ".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx",
+    # C#
+    ".cs",
+    # Ruby
+    ".rb",
+    # PHP
+    ".php",
+    # Swift
+    ".swift",
+    # Shell
+    ".sh", ".bash",
+    # Perl
+    ".pl", ".pm",
+    # Lua
+    ".lua",
+    # Clojure
+    ".clj", ".cljs",
+    # Elixir
+    ".ex", ".exs",
+    # Haskell
+    ".hs",
+    # Erlang
+    ".erl",
+    # OCaml
+    ".ml", ".mli",
+    # Julia
+    ".jl",
+    # Dart
+    ".dart",
+    # R
+    ".r",
+}
+
+_STRIP_MARKER = ".source_only_stripped"
+
+
+def strip_non_source_files(repo_path: Path) -> int:
+    """Remove non-source-code files from a cloned repo.
+
+    Keeps only files whose extension (case-insensitive) is in
+    ``_SOURCE_EXTENSIONS``.  Skips the ``.git`` directory.
+    Writes a marker file so the operation is idempotent across reruns.
+
+    Returns the number of files removed.
+    """
+    marker = repo_path / _STRIP_MARKER
+    if marker.exists():
+        logger.debug("Already stripped: %s", repo_path)
+        return 0
+
+    removed = 0
+    for f in repo_path.rglob("*"):
+        if not f.is_file():
+            continue
+        try:
+            rel = f.relative_to(repo_path)
+        except ValueError:
+            continue
+        if rel.parts[0] == ".git":
+            continue
+        if f.suffix.lower() not in _SOURCE_EXTENSIONS:
+            f.unlink()
+            removed += 1
+
+    # Clean up empty directories (bottom-up).
+    for d in sorted(repo_path.rglob("*"), reverse=True):
+        if not d.is_dir():
+            continue
+        try:
+            rel = d.relative_to(repo_path)
+        except ValueError:
+            continue
+        if rel.parts[0] == ".git":
+            continue
+        try:
+            d.rmdir()  # succeeds only when empty
+        except OSError:
+            pass
+
+    marker.write_text(str(removed))
+    logger.info("Stripped %d non-source files from %s", removed, repo_path)
+    return removed
+
 
 def clone_or_reuse(
     repo: str,
