@@ -280,6 +280,32 @@ impl GraphStore {
         Ok(count as usize)
     }
 
+    /// List lightweight symbol references (id, name, qualified_name, file_path).
+    ///
+    /// Used by the relation resolver to build phantom ID lookups without
+    /// fetching heavy fields like body_text, signature, etc.
+    pub fn list_symbol_refs(&self) -> Result<Vec<(SymbolId, String, String, String)>, StorageError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, name, qualified_name, file_path FROM symbols",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id_bytes: Vec<u8> = row.get(0)?;
+            let arr: [u8; 16] = id_bytes.try_into().map_err(|_| {
+                StorageError::TransactionFailed {
+                    reason: "invalid symbol ID length in database".into(),
+                }
+            })?;
+            let id = SymbolId::from_bytes(arr);
+            let name: String = row.get(1)?;
+            let qualified_name: String = row.get(2)?;
+            let file_path: String = row.get(3)?;
+            results.push((id, name, qualified_name, file_path));
+        }
+        Ok(results)
+    }
+
     /// Query symbols by a batch of IDs.
     ///
     /// Returns symbols in arbitrary order. IDs not found are silently skipped.

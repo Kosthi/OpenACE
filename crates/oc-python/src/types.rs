@@ -186,6 +186,10 @@ pub struct PyIndexReport {
     #[pyo3(get)]
     pub total_relations: usize,
     #[pyo3(get)]
+    pub relations_resolved: usize,
+    #[pyo3(get)]
+    pub relations_unresolved: usize,
+    #[pyo3(get)]
     pub total_chunks: usize,
     #[pyo3(get)]
     pub duration_secs: f64,
@@ -195,9 +199,9 @@ pub struct PyIndexReport {
 impl PyIndexReport {
     fn __repr__(&self) -> String {
         format!(
-            "IndexReport(files={}, symbols={}, relations={}, chunks={}, duration={:.2}s)",
+            "IndexReport(files={}, symbols={}, relations={}, resolved={}, chunks={}, duration={:.2}s)",
             self.files_indexed, self.total_symbols, self.total_relations,
-            self.total_chunks, self.duration_secs
+            self.relations_resolved, self.total_chunks, self.duration_secs
         )
     }
 }
@@ -211,6 +215,8 @@ impl From<IndexReport> for PyIndexReport {
             files_failed: r.files_failed,
             total_symbols: r.total_symbols,
             total_relations: r.total_relations,
+            relations_resolved: r.relations_resolved,
+            relations_unresolved: r.relations_unresolved,
             total_chunks: r.total_chunks,
             duration_secs: r.duration.as_secs_f64(),
         }

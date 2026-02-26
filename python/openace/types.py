@@ -68,12 +68,14 @@ class IndexReport:
     total_relations: int
     duration_secs: float
     total_chunks: int = 0
+    relations_resolved: int = 0
+    relations_unresolved: int = 0
 
     def __repr__(self) -> str:
         return (
             f"IndexReport(files={self.files_indexed}, symbols={self.total_symbols}, "
-            f"relations={self.total_relations}, chunks={self.total_chunks}, "
-            f"duration={self.duration_secs:.2f}s)"
+            f"relations={self.total_relations}, resolved={self.relations_resolved}, "
+            f"chunks={self.total_chunks}, duration={self.duration_secs:.2f}s)"
         )
 
 

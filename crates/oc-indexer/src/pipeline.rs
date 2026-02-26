@@ -229,6 +229,24 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
     // Build set of known symbol IDs for relation filtering
     let known_ids: HashSet<oc_core::SymbolId> = all_symbols.iter().map(|s| s.id).collect();
 
+    // Resolve dangling cross-file references before insertion.
+    // The parser generates phantom IDs for cross-file targets (Calls, Imports);
+    // this step maps them back to real symbol IDs using name matching.
+    let sym_refs: Vec<crate::resolver::SymbolRef> =
+        all_symbols.iter().map(crate::resolver::SymbolRef::from).collect();
+    let resolution_stats = crate::resolver::resolve_relations(
+        &mut all_relations, &sym_refs, &known_ids,
+    );
+    tracing::info!(
+        total = resolution_stats.total,
+        resolved_qname = resolution_stats.resolved_by_qualified_name,
+        resolved_suffix = resolution_stats.resolved_by_suffix,
+        resolved_name = resolution_stats.resolved_by_name,
+        already_resolved = resolution_stats.already_resolved,
+        unresolved = resolution_stats.unresolved,
+        "cross-file relation resolution"
+    );
+
     // Filter relations to only those whose source is a known symbol.
     // Target may be unresolved (cross-file or external) — we allow dangling
     // target references since the FK constraint on target_id has been removed.
@@ -327,6 +345,10 @@ pub fn index(project_path: &Path, config: &IndexConfig) -> Result<IndexReport, I
         failed_details,
         total_symbols,
         total_relations: valid_relation_count,
+        relations_resolved: resolution_stats.resolved_by_qualified_name
+            + resolution_stats.resolved_by_suffix
+            + resolution_stats.resolved_by_name,
+        relations_unresolved: resolution_stats.unresolved,
         total_chunks,
         duration,
     })
@@ -423,6 +445,8 @@ pub fn index_incremental(
                 failed_details: report.failed_details,
                 total_symbols: report.total_symbols,
                 total_relations: report.total_relations,
+                relations_resolved: report.relations_resolved,
+                relations_unresolved: report.relations_unresolved,
                 total_chunks: report.total_chunks,
                 duration,
             },
@@ -567,6 +591,8 @@ pub fn index_incremental(
             failed_details,
             total_symbols,
             total_relations: 0, // Not tracked in incremental mode
+            relations_resolved: 0,
+            relations_unresolved: 0,
             total_chunks,
             duration,
         },

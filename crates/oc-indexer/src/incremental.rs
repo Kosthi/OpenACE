@@ -262,6 +262,36 @@ pub fn update_file(
     // Delete remaining relations sourced from this file, then insert all new ones.
     delete_relations_for_file(storage, rel_path)?;
 
+    // Resolve dangling cross-file references before insertion.
+    // Load lightweight symbol refs from DB to build the phantom lookup.
+    let mut new_relations = new_relations;
+    let db_refs = storage.graph().list_symbol_refs().map_err(|e| {
+        IndexerError::PipelineFailed {
+            stage: "list_symbol_refs".to_string(),
+            reason: e.to_string(),
+        }
+    })?;
+    let sym_refs: Vec<crate::resolver::SymbolRef> = db_refs
+        .into_iter()
+        .map(|(id, name, qualified_name, file_path)| crate::resolver::SymbolRef {
+            id,
+            name,
+            qualified_name,
+            file_path,
+        })
+        .collect();
+    let known_ids: HashSet<SymbolId> = sym_refs.iter().map(|s| s.id).collect();
+    let resolution_stats =
+        crate::resolver::resolve_relations(&mut new_relations, &sym_refs, &known_ids);
+    tracing::debug!(
+        total = resolution_stats.total,
+        resolved = resolution_stats.resolved_by_qualified_name
+            + resolution_stats.resolved_by_suffix
+            + resolution_stats.resolved_by_name,
+        unresolved = resolution_stats.unresolved,
+        "incremental relation resolution for {}", rel_path,
+    );
+
     // Validate and insert new relations.
     // Source must exist in the graph store (it was just inserted/updated for
     // this file). Target may be cross-file or unresolved — we allow dangling

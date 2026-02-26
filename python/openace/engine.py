@@ -162,6 +162,8 @@ def _convert_index_report(py_report) -> IndexReport:
         total_relations=py_report.total_relations,
         duration_secs=py_report.duration_secs,
         total_chunks=getattr(py_report, 'total_chunks', 0),
+        relations_resolved=getattr(py_report, 'relations_resolved', 0),
+        relations_unresolved=getattr(py_report, 'relations_unresolved', 0),
     )
 
 
@@ -287,6 +289,8 @@ class Engine:
             total_relations=py_result.total_relations,
             duration_secs=py_result.duration_secs,
             total_chunks=py_result.total_chunks,
+            relations_resolved=getattr(py_result, 'relations_resolved', 0),
+            relations_unresolved=getattr(py_result, 'relations_unresolved', 0),
         )
 
         # Selective embedding based on what changed

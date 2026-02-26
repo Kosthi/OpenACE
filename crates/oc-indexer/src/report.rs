@@ -48,6 +48,8 @@ pub struct IndexReport {
     pub failed_details: Vec<(String, String)>,
     pub total_symbols: usize,
     pub total_relations: usize,
+    pub relations_resolved: usize,
+    pub relations_unresolved: usize,
     pub total_chunks: usize,
     pub duration: Duration,
 }
