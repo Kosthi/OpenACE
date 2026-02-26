@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use oc_core::{CodeSymbol, Language, QualifiedName, SymbolId, SymbolKind};
+use oc_core::{CodeSymbol, Language, QualifiedName, RelationKind, SymbolId, SymbolKind};
 use oc_storage::graph::TraversalDirection;
 use oc_storage::manager::StorageManager;
 
@@ -40,6 +40,18 @@ pub struct SearchQuery {
     pub bm25_text: Option<String>,
     /// Identifiers for exact match signal; falls back to `text` if empty.
     pub exact_queries: Vec<String>,
+    /// Enable relation-aware graph expansion sub-signals.
+    /// When true, graph expansion is split into separate callers (Calls
+    /// incoming), callees (Calls outgoing), and hierarchy (Contains)
+    /// sub-signals, each scored independently via RRF.
+    /// When false, uses the original undirected all-relation-type expansion.
+    pub enable_relation_aware_graph: bool,
+    /// Weight multiplier for callee graph signal (Calls outgoing).
+    pub callee_weight: f64,
+    /// Weight multiplier for caller graph signal (Calls incoming).
+    pub caller_weight: f64,
+    /// Weight multiplier for hierarchy graph signal (Contains).
+    pub hierarchy_weight: f64,
 }
 
 impl SearchQuery {
@@ -64,6 +76,10 @@ impl SearchQuery {
             graph_weight: 1.0,
             bm25_text: None,
             exact_queries: Vec::new(),
+            enable_relation_aware_graph: true,
+            callee_weight: 1.5,
+            caller_weight: 1.2,
+            hierarchy_weight: 0.8,
         }
     }
 
@@ -153,7 +169,11 @@ impl<'a> RetrievalEngine<'a> {
 
         // Signal 5: Graph expansion (applied to hits from direct signals)
         if query.enable_graph_expansion && !candidates.is_empty() {
-            self.expand_graph(query, &mut candidates);
+            if query.enable_relation_aware_graph {
+                self.expand_graph_relation_aware(query, &mut candidates);
+            } else {
+                self.expand_graph(query, &mut candidates);
+            }
         }
 
         // Fuse, sort, truncate
@@ -495,6 +515,123 @@ impl<'a> RetrievalEngine<'a> {
         }
     }
 
+    /// Relation-aware graph expansion: splits traversal into three directed
+    /// sub-signals, each filtered by relation type and scored independently.
+    ///
+    /// - **callees** (`Calls` outgoing): functions called by the seed symbol
+    /// - **callers** (`Calls` incoming): functions that call the seed symbol
+    /// - **hierarchy** (`Contains` both): parent/child containment relationships
+    ///
+    /// Each sub-signal is scored via its own RRF pass with a dedicated weight,
+    /// producing finer-grained ranking than the original all-relation expansion.
+    fn expand_graph_relation_aware(
+        &self,
+        query: &SearchQuery,
+        candidates: &mut HashMap<SymbolId, ScoredCandidate>,
+    ) {
+        let depth = query.effective_graph_depth();
+        let seed_ids: Vec<SymbolId> = candidates.keys().copied().collect();
+
+        // Sub-signal definitions: (relation kinds, direction, signal name, weight)
+        let sub_signals: &[(&[RelationKind], TraversalDirection, &str, f64)] = &[
+            (
+                &[RelationKind::Calls],
+                TraversalDirection::Outgoing,
+                "graph_callees",
+                query.callee_weight,
+            ),
+            (
+                &[RelationKind::Calls],
+                TraversalDirection::Incoming,
+                "graph_callers",
+                query.caller_weight,
+            ),
+            (
+                &[RelationKind::Contains],
+                TraversalDirection::Both,
+                "graph_hierarchy",
+                query.hierarchy_weight,
+            ),
+        ];
+
+        for &(relation_kinds, direction, signal_name, weight) in sub_signals {
+            if weight <= 0.0 {
+                continue;
+            }
+
+            let mut graph_hits: HashMap<SymbolId, u32> = HashMap::new();
+
+            for seed in &seed_ids {
+                let traversal = self.storage.graph().traverse_khop_filtered(
+                    *seed,
+                    depth,
+                    50,
+                    direction,
+                    Some(relation_kinds),
+                );
+
+                let hits = match traversal {
+                    Ok(h) => h,
+                    Err(_) => continue,
+                };
+
+                for hit in hits {
+                    let entry = graph_hits.entry(hit.symbol_id).or_insert(hit.depth);
+                    if hit.depth < *entry {
+                        *entry = hit.depth;
+                    }
+                }
+            }
+
+            // Remove seeds
+            for seed in &seed_ids {
+                graph_hits.remove(seed);
+            }
+
+            // Filter by language and file path
+            let mut filtered: Vec<(SymbolId, u32)> = Vec::new();
+            for (sid, depth_val) in &graph_hits {
+                if let Ok(Some(sym)) = self.storage.graph().get_symbol(*sid) {
+                    let pass_lang = query
+                        .language_filter
+                        .map_or(true, |l| sym.language == l);
+                    let pass_path = query.file_path_filter.as_ref().map_or(true, |prefix| {
+                        sym.file_path.to_string_lossy().starts_with(prefix.as_str())
+                    });
+                    if pass_lang && pass_path {
+                        filtered.push((*sid, *depth_val));
+                    }
+                }
+            }
+
+            // Sort by depth then SymbolId
+            filtered.sort_by(|(sid_a, d_a), (sid_b, d_b)| {
+                d_a.cmp(d_b).then_with(|| sid_a.cmp(sid_b))
+            });
+
+            tracing::debug!(
+                signal = signal_name,
+                count = filtered.len(),
+                "relation-aware sub-signal collected"
+            );
+
+            for (rank, (sid, _)) in filtered.iter().enumerate() {
+                let rrf_score = 1.0 / (rank as f64 + 1.0 + RRF_K);
+                let entry = candidates
+                    .entry(*sid)
+                    .or_insert_with(|| ScoredCandidate {
+                        symbol_id: *sid,
+                        score: 0.0,
+                        signals: Vec::new(),
+                    });
+                entry.score += weight * rrf_score;
+                if !entry.signals.contains(&signal_name.to_string()) {
+                    entry.signals.push(signal_name.to_string());
+                }
+            }
+        }
+    }
+
     /// Hydrate a ScoredCandidate into a full SearchResult by fetching the symbol
     /// from the graph store.
     fn hydrate_candidate(
@@ -546,6 +683,9 @@ impl<'a> RetrievalEngine<'a> {
     }
 
     /// Attach graph-expanded neighbors as `related_symbols` on each direct hit.
+    /// When relation-aware mode is enabled, related symbols carry typed signal
+    /// names (`graph_callers`, `graph_callees`, `graph_hierarchy`) instead of
+    /// the generic `graph`.
     fn attach_related_symbols(
         &self,
         direct_hit_ids: &HashSet<SymbolId>,
@@ -559,28 +699,65 @@ impl<'a> RetrievalEngine<'a> {
                 continue;
             }
 
-            let traversal = self.storage.graph().traverse_khop(
-                result.symbol_id,
-                depth,
-                50,
-                TraversalDirection::Both,
-            );
+            if query.enable_relation_aware_graph {
+                let mut related = Vec::new();
+                let mut seen = HashSet::new();
 
-            let hits = match traversal {
-                Ok(h) => h,
-                Err(_) => continue,
-            };
+                let sub_signals: &[(&[RelationKind], TraversalDirection, &str)] = &[
+                    (&[RelationKind::Calls], TraversalDirection::Outgoing, "graph_callees"),
+                    (&[RelationKind::Calls], TraversalDirection::Incoming, "graph_callers"),
+                    (&[RelationKind::Contains], TraversalDirection::Both, "graph_hierarchy"),
+                ];
 
-            let mut related = Vec::new();
-            for hit in hits {
-                if hit.symbol_id == result.symbol_id {
-                    continue;
+                for &(kinds, direction, signal_name) in sub_signals {
+                    let traversal = self.storage.graph().traverse_khop_filtered(
+                        result.symbol_id,
+                        depth,
+                        50,
+                        direction,
+                        Some(kinds),
+                    );
+
+                    let hits = match traversal {
+                        Ok(h) => h,
+                        Err(_) => continue,
+                    };
+
+                    for hit in hits {
+                        if hit.symbol_id == result.symbol_id || !seen.insert(hit.symbol_id) {
+                            continue;
+                        }
+                        if let Ok(Some(sym)) = self.storage.graph().get_symbol(hit.symbol_id) {
+                            related.push(Self::symbol_to_result(&sym, signal_name));
+                        }
+                    }
                 }
-                if let Ok(Some(sym)) = self.storage.graph().get_symbol(hit.symbol_id) {
-                    related.push(Self::symbol_to_result(&sym, "graph"));
+
+                result.related_symbols = related;
+            } else {
+                let traversal = self.storage.graph().traverse_khop(
+                    result.symbol_id,
+                    depth,
+                    50,
+                    TraversalDirection::Both,
+                );
+
+                let hits = match traversal {
+                    Ok(h) => h,
+                    Err(_) => continue,
+                };
+
+                let mut related = Vec::new();
+                for hit in hits {
+                    if hit.symbol_id == result.symbol_id {
+                        continue;
+                    }
+                    if let Ok(Some(sym)) = self.storage.graph().get_symbol(hit.symbol_id) {
+                        related.push(Self::symbol_to_result(&sym, "graph"));
+                    }
                 }
+                result.related_symbols = related;
             }
-            result.related_symbols = related;
         }
 
         Ok(())
@@ -622,6 +799,45 @@ mod tests {
             doc_comment: None,
             body_hash: 42,
             body_text: None,
+        }
+    }
+
+    fn make_class_symbol(
+        name: &str,
+        qname: &str,
+        file: &str,
+        byte_start: usize,
+        byte_end: usize,
+        language: Language,
+    ) -> CodeSymbol {
+        CodeSymbol {
+            id: SymbolId::generate("test-repo", file, qname, byte_start, byte_end),
+            name: name.to_string(),
+            qualified_name: qname.to_string(),
+            kind: SymbolKind::Class,
+            language,
+            file_path: PathBuf::from(file),
+            byte_range: byte_start..byte_end,
+            line_range: 0..20,
+            signature: Some(format!("class {name}")),
+            doc_comment: None,
+            body_hash: 42,
+            body_text: None,
+        }
+    }
+
+    fn make_relation(
+        source: &CodeSymbol,
+        target: &CodeSymbol,
+        kind: RelationKind,
+    ) -> CodeRelation {
+        CodeRelation {
+            source_id: source.id,
+            target_id: target.id,
+            kind,
+            file_path: source.file_path.clone(),
+            line: 5,
+            confidence: kind.default_confidence(),
         }
     }
 
@@ -786,6 +1002,10 @@ mod tests {
         assert!((q.graph_weight - 1.0).abs() < f64::EPSILON);
         assert!(q.bm25_text.is_none());
         assert!(q.exact_queries.is_empty());
+        assert!(q.enable_relation_aware_graph);
+        assert!((q.callee_weight - 1.5).abs() < f64::EPSILON);
+        assert!((q.caller_weight - 1.2).abs() < f64::EPSILON);
+        assert!((q.hierarchy_weight - 0.8).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -870,9 +1090,10 @@ mod tests {
         assert!(result_ids.contains(&sym_b.id), "validate_input should appear via graph expansion");
         assert!(result_ids.contains(&sym_c.id), "format_output should appear via graph expansion");
 
-        // Graph-expanded results should have the "graph" signal
+        // Graph-expanded results should have a graph signal (relation-aware by default)
         let graph_result = results.iter().find(|r| r.symbol_id == sym_b.id).unwrap();
-        assert!(graph_result.match_signals.contains(&"graph".to_string()));
+        let has_graph_signal = graph_result.match_signals.iter().any(|s| s.starts_with("graph"));
+        assert!(has_graph_signal, "expected a graph signal, got: {:?}", graph_result.match_signals);
     }
 
     // --- Integration test: search with graph expansion disabled ---
@@ -1118,5 +1339,357 @@ mod tests {
         assert!(!results.is_empty());
         assert_eq!(results[0].name, "target_fn");
         assert!(results[0].match_signals.contains(&"exact".to_string()));
+    }
+
+    // --- Relation-aware graph expansion tests ---
+
+    /// Build a project graph: A calls B, A calls C, D contains A.
+    /// Verify that relation-aware expansion produces typed signals.
+    #[test]
+    fn relation_aware_graph_separates_callers_callees() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage(&tmp);
+
+        let func_a = make_symbol("func_a", "mod.func_a", "src/mod.py", 0, 100, Language::Python);
+        let func_b = make_symbol("func_b", "mod.func_b", "src/mod.py", 200, 300, Language::Python);
+        let func_c = make_symbol("func_c", "mod.func_c", "src/mod.py", 400, 500, Language::Python);
+
+        // A calls B, A calls C
+        let rel_ab = make_relation(&func_a, &func_b, RelationKind::Calls);
+        let rel_ac = make_relation(&func_a, &func_c, RelationKind::Calls);
+
+        mgr.graph_mut()
+            .insert_symbols(&[func_a.clone(), func_b.clone(), func_c.clone()], 1000)
+            .unwrap();
+        mgr.graph_mut()
+            .insert_relations(&[rel_ab, rel_ac], 1000)
+            .unwrap();
+
+        mgr.fulltext_mut()
+            .add_document(&func_a, Some("def func_a(): func_b(); func_c()"))
+            .unwrap();
+        mgr.fulltext_mut()
+            .add_document(&func_b, Some("def func_b(): pass"))
+            .unwrap();
+        mgr.fulltext_mut()
+            .add_document(&func_c, Some("def func_c(): pass"))
+            .unwrap();
+        mgr.fulltext_mut().commit().unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+
+        // Search for func_a with relation-aware graph enabled
+        let mut query = SearchQuery::new("func_a");
+        query.enable_relation_aware_graph = true;
+        let results = engine.search(&query).unwrap();
+
+        // func_a should be top hit
+        assert!(!results.is_empty());
+        assert_eq!(results[0].name, "func_a");
+
+        // func_b and func_c should appear as graph_callees (A calls B, A calls C)
+        let result_b = results.iter().find(|r| r.name == "func_b");
+        assert!(result_b.is_some(), "func_b should appear via graph_callees");
+        assert!(
+            result_b.unwrap().match_signals.contains(&"graph_callees".to_string()),
+            "func_b signals: {:?}",
+            result_b.unwrap().match_signals
+        );
+
+        let result_c = results.iter().find(|r| r.name == "func_c");
+        assert!(result_c.is_some(), "func_c should appear via graph_callees");
+        assert!(
+            result_c.unwrap().match_signals.contains(&"graph_callees".to_string()),
+            "func_c signals: {:?}",
+            result_c.unwrap().match_signals
+        );
+    }
+
+    #[test]
+    fn relation_aware_callers_signal() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage(&tmp);
+
+        let caller = make_symbol("caller", "mod.caller", "src/mod.py", 0, 100, Language::Python);
+        let target = make_symbol("xtarget", "mod.xtarget", "src/mod.py", 200, 300, Language::Python);
+
+        // caller calls target
+        let rel = make_relation(&caller, &target, RelationKind::Calls);
+
+        mgr.graph_mut()
+            .insert_symbols(&[caller.clone(), target.clone()], 1000)
+            .unwrap();
+        mgr.graph_mut().insert_relations(&[rel], 1000).unwrap();
+
+        // Use body text that won't match "xtarget" for the caller
+        mgr.fulltext_mut()
+            .add_document(&target, Some("def xtarget(): pass"))
+            .unwrap();
+        mgr.fulltext_mut()
+            .add_document(&caller, Some("def caller(): invoke_something()"))
+            .unwrap();
+        mgr.fulltext_mut().commit().unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+
+        // Search for xtarget — caller should appear as graph_callers
+        let mut query = SearchQuery::new("xtarget");
+        query.enable_relation_aware_graph = true;
+        let results = engine.search(&query).unwrap();
+
+        let caller_result = results.iter().find(|r| r.name == "caller");
+        assert!(
+            caller_result.is_some(),
+            "caller should appear via graph_callers"
+        );
+        assert!(
+            caller_result.unwrap().match_signals.contains(&"graph_callers".to_string()),
+            "caller signals: {:?}",
+            caller_result.unwrap().match_signals
+        );
+    }
+
+    #[test]
+    fn relation_aware_hierarchy_signal() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage(&tmp);
+
+        let class_sym = make_class_symbol("MyClass", "mod.MyClass", "src/mod.py", 0, 500, Language::Python);
+        let method = make_symbol("my_method", "mod.MyClass.my_method", "src/mod.py", 100, 200, Language::Python);
+
+        // MyClass contains my_method
+        let rel = make_relation(&class_sym, &method, RelationKind::Contains);
+
+        mgr.graph_mut()
+            .insert_symbols(&[class_sym.clone(), method.clone()], 1000)
+            .unwrap();
+        mgr.graph_mut().insert_relations(&[rel], 1000).unwrap();
+
+        mgr.fulltext_mut()
+            .add_document(&method, Some("def my_method(self): pass"))
+            .unwrap();
+        mgr.fulltext_mut()
+            .add_document(&class_sym, Some("class MyClass: pass"))
+            .unwrap();
+        mgr.fulltext_mut().commit().unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+
+        // Search for my_method — MyClass should appear via graph_hierarchy
+        let mut query = SearchQuery::new("my_method");
+        query.enable_relation_aware_graph = true;
+        let results = engine.search(&query).unwrap();
+
+        let class_result = results.iter().find(|r| r.name == "MyClass");
+        assert!(
+            class_result.is_some(),
+            "MyClass should appear via graph_hierarchy"
+        );
+        assert!(
+            class_result.unwrap().match_signals.contains(&"graph_hierarchy".to_string()),
+            "MyClass signals: {:?}",
+            class_result.unwrap().match_signals
+        );
+    }
+
+    #[test]
+    fn relation_aware_does_not_mix_calls_and_contains() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage(&tmp);
+
+        let func_a = make_symbol("func_a", "mod.func_a", "src/mod.py", 0, 100, Language::Python);
+        let func_b = make_symbol("func_b", "mod.func_b", "src/mod.py", 200, 300, Language::Python);
+        let class_c = make_class_symbol("ClassC", "mod.ClassC", "src/mod.py", 400, 600, Language::Python);
+
+        // A calls B (Calls), C contains A (Contains)
+        let rel_call = make_relation(&func_a, &func_b, RelationKind::Calls);
+        let rel_contains = make_relation(&class_c, &func_a, RelationKind::Contains);
+
+        mgr.graph_mut()
+            .insert_symbols(&[func_a.clone(), func_b.clone(), class_c.clone()], 1000)
+            .unwrap();
+        mgr.graph_mut()
+            .insert_relations(&[rel_call, rel_contains], 1000)
+            .unwrap();
+
+        mgr.fulltext_mut()
+            .add_document(&func_a, Some("def func_a(): func_b()"))
+            .unwrap();
+        mgr.fulltext_mut()
+            .add_document(&func_b, Some("def func_b(): pass"))
+            .unwrap();
+        mgr.fulltext_mut()
+            .add_document(&class_c, Some("class ClassC: pass"))
+            .unwrap();
+        mgr.fulltext_mut().commit().unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+
+        // Search for func_a — B should be graph_callees, C should be graph_hierarchy
+        let mut query = SearchQuery::new("func_a");
+        query.enable_relation_aware_graph = true;
+        let results = engine.search(&query).unwrap();
+
+        let result_b = results.iter().find(|r| r.name == "func_b");
+        assert!(result_b.is_some());
+        let b_signals = &result_b.unwrap().match_signals;
+        assert!(b_signals.contains(&"graph_callees".to_string()), "func_b signals: {:?}", b_signals);
+        assert!(!b_signals.contains(&"graph_hierarchy".to_string()), "func_b should NOT have hierarchy signal");
+
+        let result_c = results.iter().find(|r| r.name == "ClassC");
+        assert!(result_c.is_some());
+        let c_signals = &result_c.unwrap().match_signals;
+        assert!(c_signals.contains(&"graph_hierarchy".to_string()), "ClassC signals: {:?}", c_signals);
+        assert!(!c_signals.contains(&"graph_callees".to_string()), "ClassC should NOT have callees signal");
+    }
+
+    #[test]
+    fn callee_weight_higher_ranks_callees_above_callers() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage(&tmp);
+
+        let target = make_symbol("target", "mod.target", "src/mod.py", 0, 100, Language::Python);
+        let callee = make_symbol("callee_fn", "mod.callee_fn", "src/mod.py", 200, 300, Language::Python);
+        let caller = make_symbol("caller_fn", "mod.caller_fn", "src/mod.py", 400, 500, Language::Python);
+
+        // target calls callee, caller calls target
+        let rel_out = make_relation(&target, &callee, RelationKind::Calls);
+        let rel_in = make_relation(&caller, &target, RelationKind::Calls);
+
+        mgr.graph_mut()
+            .insert_symbols(&[target.clone(), callee.clone(), caller.clone()], 1000)
+            .unwrap();
+        mgr.graph_mut()
+            .insert_relations(&[rel_out, rel_in], 1000)
+            .unwrap();
+
+        mgr.fulltext_mut()
+            .add_document(&target, Some("def target(): callee_fn()"))
+            .unwrap();
+        mgr.fulltext_mut()
+            .add_document(&callee, Some("def callee_fn(): pass"))
+            .unwrap();
+        mgr.fulltext_mut()
+            .add_document(&caller, Some("def caller_fn(): target()"))
+            .unwrap();
+        mgr.fulltext_mut().commit().unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+
+        // With callee_weight > caller_weight, callee should score higher
+        let mut query = SearchQuery::new("target");
+        query.enable_relation_aware_graph = true;
+        query.callee_weight = 3.0;
+        query.caller_weight = 1.0;
+        let results = engine.search(&query).unwrap();
+
+        let callee_result = results.iter().find(|r| r.name == "callee_fn").unwrap();
+        let caller_result = results.iter().find(|r| r.name == "caller_fn").unwrap();
+
+        assert!(
+            callee_result.score > caller_result.score,
+            "callee (score={}) should rank above caller (score={}) when callee_weight > caller_weight",
+            callee_result.score, caller_result.score
+        );
+    }
+
+    #[test]
+    fn fallback_to_legacy_graph_when_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage(&tmp);
+
+        let func_a = make_symbol("func_a", "mod.func_a", "src/mod.py", 0, 100, Language::Python);
+        let func_b = make_symbol("func_b", "mod.func_b", "src/mod.py", 200, 300, Language::Python);
+
+        let rel = make_relation(&func_a, &func_b, RelationKind::Calls);
+
+        mgr.graph_mut()
+            .insert_symbols(&[func_a.clone(), func_b.clone()], 1000)
+            .unwrap();
+        mgr.graph_mut().insert_relations(&[rel], 1000).unwrap();
+
+        mgr.fulltext_mut()
+            .add_document(&func_a, Some("def func_a(): func_b()"))
+            .unwrap();
+        mgr.fulltext_mut()
+            .add_document(&func_b, Some("def func_b(): pass"))
+            .unwrap();
+        mgr.fulltext_mut().commit().unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+
+        // With relation-aware disabled, should use the old "graph" signal name
+        let mut query = SearchQuery::new("func_a");
+        query.enable_relation_aware_graph = false;
+        let results = engine.search(&query).unwrap();
+
+        let result_b = results.iter().find(|r| r.name == "func_b");
+        assert!(result_b.is_some(), "func_b should still appear via legacy graph expansion");
+        assert!(
+            result_b.unwrap().match_signals.contains(&"graph".to_string()),
+            "should use generic 'graph' signal, got: {:?}",
+            result_b.unwrap().match_signals
+        );
+        // Should NOT have typed signal names
+        assert!(
+            !result_b.unwrap().match_signals.contains(&"graph_callees".to_string()),
+            "legacy mode should not produce typed graph signals"
+        );
+    }
+
+    #[test]
+    fn relation_aware_related_symbols_carry_typed_signals() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage(&tmp);
+
+        let func_a = make_symbol("func_a", "mod.func_a", "src/mod.py", 0, 100, Language::Python);
+        let func_b = make_symbol("func_b", "mod.func_b", "src/mod.py", 200, 300, Language::Python);
+        let class_c = make_class_symbol("ClassC", "mod.ClassC", "src/mod.py", 400, 600, Language::Python);
+
+        let rel_call = make_relation(&func_a, &func_b, RelationKind::Calls);
+        let rel_contains = make_relation(&class_c, &func_a, RelationKind::Contains);
+
+        mgr.graph_mut()
+            .insert_symbols(&[func_a.clone(), func_b.clone(), class_c.clone()], 1000)
+            .unwrap();
+        mgr.graph_mut()
+            .insert_relations(&[rel_call, rel_contains], 1000)
+            .unwrap();
+
+        mgr.fulltext_mut()
+            .add_document(&func_a, Some("def func_a(): func_b()"))
+            .unwrap();
+        mgr.fulltext_mut().commit().unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+
+        let mut query = SearchQuery::new("func_a");
+        query.enable_relation_aware_graph = true;
+        let results = engine.search(&query).unwrap();
+
+        // Check related_symbols on func_a carry typed signal names
+        let func_a_result = results.iter().find(|r| r.name == "func_a").unwrap();
+        let related_names: Vec<&str> = func_a_result
+            .related_symbols
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+
+        assert!(
+            related_names.contains(&"func_b"),
+            "func_b should be in related_symbols, got: {:?}",
+            related_names
+        );
+
+        let related_b = func_a_result
+            .related_symbols
+            .iter()
+            .find(|r| r.name == "func_b")
+            .unwrap();
+        assert!(
+            related_b.match_signals.contains(&"graph_callees".to_string()),
+            "related func_b should have graph_callees signal, got: {:?}",
+            related_b.match_signals
+        );
     }
 }

@@ -385,6 +385,22 @@ impl GraphStore {
         max_fanout: u32,
         direction: TraversalDirection,
     ) -> Result<Vec<TraversalHit>, StorageError> {
+        self.traverse_khop_filtered(start, max_depth, max_fanout, direction, None)
+    }
+
+    /// K-hop graph traversal filtered by relation kinds.
+    ///
+    /// Like `traverse_khop`, but only follows edges whose `RelationKind` is in
+    /// the provided filter set. Pass `None` to follow all relation types
+    /// (equivalent to `traverse_khop`).
+    pub fn traverse_khop_filtered(
+        &self,
+        start: SymbolId,
+        max_depth: u32,
+        max_fanout: u32,
+        direction: TraversalDirection,
+        relation_filter: Option<&[RelationKind]>,
+    ) -> Result<Vec<TraversalHit>, StorageError> {
         let max_depth = max_depth.min(5);
         let mut visited = std::collections::HashSet::new();
         visited.insert(start.0);
@@ -400,7 +416,7 @@ impl GraphStore {
 
             for sym_id in &frontier {
                 let neighbors =
-                    self.get_neighbors(*sym_id, direction, max_fanout)?;
+                    self.get_neighbors_filtered(*sym_id, direction, max_fanout, relation_filter)?;
                 for (neighbor_id, rel_kind) in neighbors {
                     if visited.insert(neighbor_id.0) {
                         results.push(TraversalHit {
@@ -419,19 +435,29 @@ impl GraphStore {
         Ok(results)
     }
 
-    fn get_neighbors(
+    fn get_neighbors_filtered(
         &self,
         sym_id: SymbolId,
         direction: TraversalDirection,
         max_fanout: u32,
+        relation_filter: Option<&[RelationKind]>,
     ) -> Result<Vec<(SymbolId, RelationKind)>, StorageError> {
         let id_bytes = sym_id.as_bytes();
         let mut results = Vec::new();
 
+        // Build optional SQL WHERE clause fragment for relation kind filtering.
+        let kind_clause = relation_filter.map(|kinds| {
+            let ordinals: Vec<String> = kinds.iter().map(|k| k.ordinal().to_string()).collect();
+            format!(" AND kind IN ({})", ordinals.join(","))
+        });
+        let kind_sql = kind_clause.as_deref().unwrap_or("");
+
         if direction == TraversalDirection::Outgoing || direction == TraversalDirection::Both {
-            let mut stmt = self.conn.prepare_cached(
-                "SELECT target_id, kind FROM relations WHERE source_id = ?1 LIMIT ?2",
-            )?;
+            let sql = format!(
+                "SELECT target_id, kind FROM relations WHERE source_id = ?1{} LIMIT ?2",
+                kind_sql
+            );
+            let mut stmt = self.conn.prepare_cached(&sql)?;
             let mut rows = stmt.query(params![id_bytes.as_slice(), max_fanout as i64])?;
             while let Some(row) = rows.next()? {
                 if let Some((sid, rk)) = parse_neighbor_row(row)? {
@@ -443,9 +469,11 @@ impl GraphStore {
         if direction == TraversalDirection::Incoming || direction == TraversalDirection::Both {
             let remaining = max_fanout.saturating_sub(results.len() as u32);
             if remaining > 0 {
-                let mut stmt = self.conn.prepare_cached(
-                    "SELECT source_id, kind FROM relations WHERE target_id = ?1 LIMIT ?2",
-                )?;
+                let sql = format!(
+                    "SELECT source_id, kind FROM relations WHERE target_id = ?1{} LIMIT ?2",
+                    kind_sql
+                );
+                let mut stmt = self.conn.prepare_cached(&sql)?;
                 let mut rows = stmt.query(params![id_bytes.as_slice(), remaining as i64])?;
                 while let Some(row) = rows.next()? {
                     if let Some((sid, rk)) = parse_neighbor_row(row)? {
@@ -1399,5 +1427,167 @@ mod tests {
 
         store.clear().unwrap();
         assert_eq!(store.count_chunks().unwrap(), 0);
+    }
+
+    // -- Filtered traversal tests --
+
+    #[test]
+    fn khop_filtered_by_calls_only() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let a = make_symbol("a", "src/a.py", 0, 10);
+        let b = make_symbol("b", "src/a.py", 20, 30);
+        let c = make_symbol("c", "src/a.py", 40, 50);
+        store
+            .insert_symbols(&[a.clone(), b.clone(), c.clone()], 1000)
+            .unwrap();
+
+        // A calls B, A contains C
+        let rels = vec![
+            make_relation(&a, &b, RelationKind::Calls),
+            make_relation(&a, &c, RelationKind::Contains),
+        ];
+        store.insert_relations(&rels, 1000).unwrap();
+
+        // Filter: only Calls relations
+        let hits = store
+            .traverse_khop_filtered(
+                a.id,
+                2,
+                50,
+                TraversalDirection::Outgoing,
+                Some(&[RelationKind::Calls]),
+            )
+            .unwrap();
+
+        let ids: Vec<u128> = hits.iter().map(|h| h.symbol_id.0).collect();
+        assert!(ids.contains(&b.id.0), "b should be reached via Calls");
+        assert!(!ids.contains(&c.id.0), "c should NOT be reached (Contains filtered out)");
+    }
+
+    #[test]
+    fn khop_filtered_by_contains_only() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let a = make_symbol("a", "src/a.py", 0, 10);
+        let b = make_symbol("b", "src/a.py", 20, 30);
+        let c = make_symbol("c", "src/a.py", 40, 50);
+        store
+            .insert_symbols(&[a.clone(), b.clone(), c.clone()], 1000)
+            .unwrap();
+
+        // A calls B, A contains C
+        let rels = vec![
+            make_relation(&a, &b, RelationKind::Calls),
+            make_relation(&a, &c, RelationKind::Contains),
+        ];
+        store.insert_relations(&rels, 1000).unwrap();
+
+        // Filter: only Contains relations
+        let hits = store
+            .traverse_khop_filtered(
+                a.id,
+                2,
+                50,
+                TraversalDirection::Outgoing,
+                Some(&[RelationKind::Contains]),
+            )
+            .unwrap();
+
+        let ids: Vec<u128> = hits.iter().map(|h| h.symbol_id.0).collect();
+        assert!(!ids.contains(&b.id.0), "b should NOT be reached (Calls filtered out)");
+        assert!(ids.contains(&c.id.0), "c should be reached via Contains");
+    }
+
+    #[test]
+    fn khop_filtered_none_follows_all() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let a = make_symbol("a", "src/a.py", 0, 10);
+        let b = make_symbol("b", "src/a.py", 20, 30);
+        let c = make_symbol("c", "src/a.py", 40, 50);
+        store
+            .insert_symbols(&[a.clone(), b.clone(), c.clone()], 1000)
+            .unwrap();
+
+        let rels = vec![
+            make_relation(&a, &b, RelationKind::Calls),
+            make_relation(&a, &c, RelationKind::Contains),
+        ];
+        store.insert_relations(&rels, 1000).unwrap();
+
+        // No filter (None) should follow all relation types
+        let hits = store
+            .traverse_khop_filtered(a.id, 2, 50, TraversalDirection::Outgoing, None)
+            .unwrap();
+
+        let ids: Vec<u128> = hits.iter().map(|h| h.symbol_id.0).collect();
+        assert!(ids.contains(&b.id.0), "b should be reached");
+        assert!(ids.contains(&c.id.0), "c should be reached");
+    }
+
+    #[test]
+    fn khop_filtered_incoming_calls() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let caller = make_symbol("caller", "src/a.py", 0, 10);
+        let target = make_symbol("target", "src/a.py", 20, 30);
+        let parent = make_symbol("parent", "src/a.py", 40, 50);
+        store
+            .insert_symbols(&[caller.clone(), target.clone(), parent.clone()], 1000)
+            .unwrap();
+
+        // caller calls target, parent contains target
+        let rels = vec![
+            make_relation(&caller, &target, RelationKind::Calls),
+            make_relation(&parent, &target, RelationKind::Contains),
+        ];
+        store.insert_relations(&rels, 1000).unwrap();
+
+        // From target, incoming Calls only -> should find caller but not parent
+        let hits = store
+            .traverse_khop_filtered(
+                target.id,
+                2,
+                50,
+                TraversalDirection::Incoming,
+                Some(&[RelationKind::Calls]),
+            )
+            .unwrap();
+
+        let ids: Vec<u128> = hits.iter().map(|h| h.symbol_id.0).collect();
+        assert!(ids.contains(&caller.id.0), "caller should be reached via incoming Calls");
+        assert!(!ids.contains(&parent.id.0), "parent should NOT be reached (Contains filtered out)");
+    }
+
+    #[test]
+    fn khop_filtered_multi_kind() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let a = make_symbol("a", "src/a.py", 0, 10);
+        let b = make_symbol("b", "src/a.py", 20, 30);
+        let c = make_symbol("c", "src/a.py", 40, 50);
+        let d = make_symbol("d", "src/a.py", 60, 70);
+        store
+            .insert_symbols(&[a.clone(), b.clone(), c.clone(), d.clone()], 1000)
+            .unwrap();
+
+        let rels = vec![
+            make_relation(&a, &b, RelationKind::Calls),
+            make_relation(&a, &c, RelationKind::Contains),
+            make_relation(&a, &d, RelationKind::Imports),
+        ];
+        store.insert_relations(&rels, 1000).unwrap();
+
+        // Filter: Calls + Contains (should exclude Imports)
+        let hits = store
+            .traverse_khop_filtered(
+                a.id,
+                2,
+                50,
+                TraversalDirection::Outgoing,
+                Some(&[RelationKind::Calls, RelationKind::Contains]),
+            )
+            .unwrap();
+
+        let ids: Vec<u128> = hits.iter().map(|h| h.symbol_id.0).collect();
+        assert!(ids.contains(&b.id.0), "b should be reached via Calls");
+        assert!(ids.contains(&c.id.0), "c should be reached via Contains");
+        assert!(!ids.contains(&d.id.0), "d should NOT be reached (Imports filtered out)");
     }
 }

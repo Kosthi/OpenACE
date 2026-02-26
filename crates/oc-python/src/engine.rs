@@ -229,6 +229,8 @@ impl EngineBinding {
         chunk_bm25_weight=1.0, graph_weight=1.0,
         bm25_pool_size=None, vector_pool_size=None, graph_depth=None,
         bm25_text=None, exact_queries=None,
+        enable_relation_aware_graph=true,
+        callee_weight=1.5, caller_weight=1.2, hierarchy_weight=0.8,
         trace_id=None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -251,6 +253,10 @@ impl EngineBinding {
         graph_depth: Option<u32>,
         bm25_text: Option<String>,
         exact_queries: Option<Vec<String>>,
+        enable_relation_aware_graph: bool,
+        callee_weight: f64,
+        caller_weight: f64,
+        hierarchy_weight: f64,
         trace_id: Option<String>,
     ) -> PyResult<Vec<PySearchResult>> {
         let text = text.to_string();
@@ -295,6 +301,10 @@ impl EngineBinding {
             if let Some(eq) = exact_queries {
                 query.exact_queries = eq;
             }
+            query.enable_relation_aware_graph = enable_relation_aware_graph;
+            query.callee_weight = callee_weight;
+            query.caller_weight = caller_weight;
+            query.hierarchy_weight = hierarchy_weight;
 
             let engine = RetrievalEngine::new(mgr);
             let results = engine
