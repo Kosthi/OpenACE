@@ -9,7 +9,7 @@ use oc_indexer::IndexConfig;
 use oc_retrieval::engine::{RetrievalEngine, SearchQuery};
 use oc_storage::manager::StorageManager;
 
-use crate::types::{PyChunkData, PyFileInfo, PyIncrementalIndexResult, PyIndexReport, PySearchResult, PySummaryChunk, PySymbol};
+use crate::types::{PyChunkData, PyFileInfo, PyFunctionContext, PyIncrementalIndexResult, PyIndexReport, PySearchResult, PySummaryChunk, PySymbol};
 
 /// Parse a 32-hex-char string into a SymbolId.
 fn parse_symbol_id(hex: &str) -> PyResult<SymbolId> {
@@ -636,6 +636,38 @@ impl EngineBinding {
             })?;
 
             Ok(total)
+        })
+    }
+
+    /// Get structured function context (callers, callees, hierarchy) for a symbol.
+    #[pyo3(signature = (symbol_id, max_depth=3, max_fanout=50, trace_id=None))]
+    fn get_function_context(
+        &self,
+        py: Python<'_>,
+        symbol_id: &str,
+        max_depth: u32,
+        max_fanout: u32,
+        trace_id: Option<String>,
+    ) -> PyResult<PyFunctionContext> {
+        let sid = parse_symbol_id(symbol_id)?;
+        let inner = Arc::clone(&self.inner);
+
+        py.allow_threads(move || {
+            let _span = tracing::info_span!(
+                "engine.get_function_context",
+                trace_id = %trace_id.as_deref().unwrap_or("")
+            ).entered();
+            let locked = lock_inner(&inner)?;
+            let mgr = locked
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("storage unavailable (indexing in progress)"))?;
+
+            let engine = RetrievalEngine::new(mgr);
+            let ctx = engine
+                .get_function_context(sid, max_depth, max_fanout)
+                .map_err(|e| PyRuntimeError::new_err(format!("get_function_context failed: {e}")))?;
+
+            Ok(PyFunctionContext::from(ctx))
         })
     }
 

@@ -121,6 +121,30 @@ pub struct ChunkInfo {
     pub chunk_score: f32,
 }
 
+/// A node in a call chain traversal result.
+#[derive(Debug, Clone)]
+pub struct CallChainNode {
+    pub symbol_id: SymbolId,
+    pub name: String,
+    pub qualified_name: String,
+    pub kind: SymbolKind,
+    pub file_path: String,
+    pub line_range: (u32, u32),
+    pub depth: u32,
+    pub signature: Option<String>,
+    pub doc_comment: Option<String>,
+    pub snippet: Option<String>,
+}
+
+/// Structured function context: callers, callees, and hierarchy around a symbol.
+#[derive(Debug, Clone)]
+pub struct FunctionContext {
+    pub symbol: CallChainNode,
+    pub callers: Vec<CallChainNode>,
+    pub callees: Vec<CallChainNode>,
+    pub hierarchy: Vec<CallChainNode>,
+}
+
 /// Accumulator for per-symbol RRF scoring.
 #[derive(Debug)]
 struct ScoredCandidate {
@@ -761,6 +785,121 @@ impl<'a> RetrievalEngine<'a> {
         }
 
         Ok(())
+    }
+
+    // --- Function context (call chain traversal) ---
+
+    /// Get structured function context for a symbol: callers, callees, and hierarchy.
+    ///
+    /// Performs three graph traversals from the given symbol:
+    /// - callers: incoming `Calls` edges (who calls this symbol?)
+    /// - callees: outgoing `Calls` edges (what does this symbol call?)
+    /// - hierarchy: bidirectional `Contains` edges (parent class/module + siblings)
+    pub fn get_function_context(
+        &self,
+        symbol_id: SymbolId,
+        max_depth: u32,
+        max_fanout: u32,
+    ) -> Result<FunctionContext, RetrievalError> {
+        let max_depth = max_depth.min(5);
+        let max_fanout = max_fanout.min(200);
+
+        // Look up the root symbol
+        let root_sym = self.storage.graph().get_symbol(symbol_id)?
+            .ok_or_else(|| RetrievalError::QueryFailed {
+                reason: format!("symbol not found: {}", symbol_id),
+            })?;
+
+        let root_node = Self::symbol_to_chain_node(&root_sym, 0);
+
+        // Callers: who calls this symbol? (incoming Calls edges)
+        let callers = self.traverse_to_chain_nodes(
+            symbol_id,
+            max_depth,
+            max_fanout,
+            TraversalDirection::Incoming,
+            &[RelationKind::Calls],
+        )?;
+
+        // Callees: what does this symbol call? (outgoing Calls edges)
+        let callees = self.traverse_to_chain_nodes(
+            symbol_id,
+            max_depth,
+            max_fanout,
+            TraversalDirection::Outgoing,
+            &[RelationKind::Calls],
+        )?;
+
+        // Hierarchy: parent/child containment (bidirectional Contains edges)
+        let hierarchy_depth = max_depth.min(2);
+        let hierarchy = self.traverse_to_chain_nodes(
+            symbol_id,
+            hierarchy_depth,
+            max_fanout,
+            TraversalDirection::Both,
+            &[RelationKind::Contains],
+        )?;
+
+        Ok(FunctionContext {
+            symbol: root_node,
+            callers,
+            callees,
+            hierarchy,
+        })
+    }
+
+    /// BFS traversal + hydration into `CallChainNode` list, sorted by depth then qualified_name.
+    fn traverse_to_chain_nodes(
+        &self,
+        symbol_id: SymbolId,
+        max_depth: u32,
+        max_fanout: u32,
+        direction: TraversalDirection,
+        relation_kinds: &[RelationKind],
+    ) -> Result<Vec<CallChainNode>, RetrievalError> {
+        let hits = self.storage.graph().traverse_khop_filtered(
+            symbol_id,
+            max_depth,
+            max_fanout,
+            direction,
+            Some(relation_kinds),
+        )?;
+
+        let mut nodes = Vec::with_capacity(hits.len());
+        for hit in &hits {
+            if let Ok(Some(sym)) = self.storage.graph().get_symbol(hit.symbol_id) {
+                nodes.push(Self::symbol_to_chain_node(&sym, hit.depth));
+            }
+        }
+
+        // Sort by depth ascending, then by qualified_name for determinism
+        nodes.sort_by(|a, b| {
+            a.depth.cmp(&b.depth)
+                .then_with(|| a.qualified_name.cmp(&b.qualified_name))
+        });
+
+        Ok(nodes)
+    }
+
+    /// Convert a `CodeSymbol` into a `CallChainNode` at the given traversal depth.
+    fn symbol_to_chain_node(sym: &CodeSymbol, depth: u32) -> CallChainNode {
+        let snippet = sym.body_text.as_ref().map(|text| {
+            let lines: Vec<&str> = text.lines().take(50).collect();
+            lines.join("\n")
+        });
+
+        CallChainNode {
+            symbol_id: sym.id,
+            name: sym.name.clone(),
+            qualified_name: QualifiedName::to_native(&sym.qualified_name, sym.language),
+            kind: sym.kind,
+            file_path: sym.file_path.to_string_lossy().into_owned(),
+            line_range: (sym.line_range.start, sym.line_range.end),
+            depth,
+            signature: sym.signature.clone(),
+            doc_comment: sym.doc_comment.clone(),
+            snippet,
+        }
     }
 }
 
@@ -1691,5 +1830,146 @@ mod tests {
             "related func_b should have graph_callees signal, got: {:?}",
             related_b.match_signals
         );
+    }
+
+    // --- Function context (call chain traversal) tests ---
+
+    #[test]
+    fn function_context_basic() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage(&tmp);
+
+        // A -> B -> C call chain
+        let sym_a = make_symbol("func_a", "mod.func_a", "src/mod.py", 0, 100, Language::Python);
+        let sym_b = make_symbol("func_b", "mod.func_b", "src/mod.py", 200, 300, Language::Python);
+        let sym_c = make_symbol("func_c", "mod.func_c", "src/mod.py", 400, 500, Language::Python);
+
+        let rel_ab = make_relation(&sym_a, &sym_b, RelationKind::Calls);
+        let rel_bc = make_relation(&sym_b, &sym_c, RelationKind::Calls);
+
+        mgr.graph_mut()
+            .insert_symbols(&[sym_a.clone(), sym_b.clone(), sym_c.clone()], 1000)
+            .unwrap();
+        mgr.graph_mut()
+            .insert_relations(&[rel_ab, rel_bc], 1000)
+            .unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+        let ctx = engine.get_function_context(sym_b.id, 3, 50).unwrap();
+
+        // Root symbol should be B
+        assert_eq!(ctx.symbol.symbol_id, sym_b.id);
+        assert_eq!(ctx.symbol.name, "func_b");
+        assert_eq!(ctx.symbol.depth, 0);
+
+        // Callers of B = [A]
+        assert_eq!(ctx.callers.len(), 1);
+        assert_eq!(ctx.callers[0].symbol_id, sym_a.id);
+        assert_eq!(ctx.callers[0].depth, 1);
+
+        // Callees of B = [C]
+        assert_eq!(ctx.callees.len(), 1);
+        assert_eq!(ctx.callees[0].symbol_id, sym_c.id);
+        assert_eq!(ctx.callees[0].depth, 1);
+    }
+
+    #[test]
+    fn function_context_multi_hop_callers() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage(&tmp);
+
+        // X -> Y -> Z call chain; query Z, callers should be [Y@1, X@2]
+        let sym_x = make_symbol("func_x", "mod.func_x", "src/mod.py", 0, 100, Language::Python);
+        let sym_y = make_symbol("func_y", "mod.func_y", "src/mod.py", 200, 300, Language::Python);
+        let sym_z = make_symbol("func_z", "mod.func_z", "src/mod.py", 400, 500, Language::Python);
+
+        let rel_xy = make_relation(&sym_x, &sym_y, RelationKind::Calls);
+        let rel_yz = make_relation(&sym_y, &sym_z, RelationKind::Calls);
+
+        mgr.graph_mut()
+            .insert_symbols(&[sym_x.clone(), sym_y.clone(), sym_z.clone()], 1000)
+            .unwrap();
+        mgr.graph_mut()
+            .insert_relations(&[rel_xy, rel_yz], 1000)
+            .unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+        let ctx = engine.get_function_context(sym_z.id, 3, 50).unwrap();
+
+        // Callers of Z: Y at depth 1, X at depth 2
+        assert_eq!(ctx.callers.len(), 2);
+        assert_eq!(ctx.callers[0].depth, 1); // sorted by depth
+        assert_eq!(ctx.callers[0].symbol_id, sym_y.id);
+        assert_eq!(ctx.callers[1].depth, 2);
+        assert_eq!(ctx.callers[1].symbol_id, sym_x.id);
+
+        // Z has no callees
+        assert!(ctx.callees.is_empty());
+    }
+
+    #[test]
+    fn function_context_symbol_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = setup_storage(&tmp);
+
+        let engine = RetrievalEngine::new(&mgr);
+        let fake_id = SymbolId(999999);
+        let result = engine.get_function_context(fake_id, 3, 50);
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("symbol not found"), "error: {}", err_msg);
+    }
+
+    #[test]
+    fn function_context_with_hierarchy() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage(&tmp);
+
+        let class_sym = make_class_symbol("MyClass", "mod.MyClass", "src/mod.py", 0, 500, Language::Python);
+        let method_a = make_symbol("method_a", "mod.MyClass.method_a", "src/mod.py", 100, 200, Language::Python);
+        let method_b = make_symbol("method_b", "mod.MyClass.method_b", "src/mod.py", 300, 400, Language::Python);
+
+        // MyClass contains method_a and method_b
+        let rel_a = make_relation(&class_sym, &method_a, RelationKind::Contains);
+        let rel_b = make_relation(&class_sym, &method_b, RelationKind::Contains);
+
+        mgr.graph_mut()
+            .insert_symbols(&[class_sym.clone(), method_a.clone(), method_b.clone()], 1000)
+            .unwrap();
+        mgr.graph_mut()
+            .insert_relations(&[rel_a, rel_b], 1000)
+            .unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+        let ctx = engine.get_function_context(method_a.id, 3, 50).unwrap();
+
+        // Hierarchy should include the class and the sibling method
+        let hierarchy_ids: Vec<SymbolId> = ctx.hierarchy.iter().map(|n| n.symbol_id).collect();
+        assert!(
+            hierarchy_ids.contains(&class_sym.id),
+            "hierarchy should contain the parent class"
+        );
+        assert!(
+            hierarchy_ids.contains(&method_b.id),
+            "hierarchy should contain sibling method_b"
+        );
+    }
+
+    #[test]
+    fn function_context_no_relations() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = setup_storage(&tmp);
+
+        let sym = make_symbol("lonely", "mod.lonely", "src/mod.py", 0, 100, Language::Python);
+        mgr.graph_mut().insert_symbols(&[sym.clone()], 1000).unwrap();
+
+        let engine = RetrievalEngine::new(&mgr);
+        let ctx = engine.get_function_context(sym.id, 3, 50).unwrap();
+
+        assert_eq!(ctx.symbol.symbol_id, sym.id);
+        assert!(ctx.callers.is_empty());
+        assert!(ctx.callees.is_empty());
+        assert!(ctx.hierarchy.is_empty());
     }
 }

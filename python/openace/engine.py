@@ -12,7 +12,7 @@ import structlog
 
 from openace.exceptions import IndexingError, OpenACEError, SearchError
 from openace.logging import get_logger
-from openace.types import ChunkInfo, IncrementalIndexReport, IndexReport, SearchResult, Symbol
+from openace.types import CallChainNode, ChunkInfo, FunctionContext, IncrementalIndexReport, IndexReport, SearchResult, Symbol
 
 logger = get_logger(__name__)
 
@@ -164,6 +164,32 @@ def _convert_index_report(py_report) -> IndexReport:
         total_chunks=getattr(py_report, 'total_chunks', 0),
         relations_resolved=getattr(py_report, 'relations_resolved', 0),
         relations_unresolved=getattr(py_report, 'relations_unresolved', 0),
+    )
+
+
+def _convert_call_chain_node(py_node) -> CallChainNode:
+    """Convert a PyCallChainNode from the Rust extension to a Python CallChainNode."""
+    return CallChainNode(
+        symbol_id=py_node.symbol_id,
+        name=py_node.name,
+        qualified_name=py_node.qualified_name,
+        kind=py_node.kind,
+        file_path=py_node.file_path,
+        line_range=py_node.line_range,
+        depth=py_node.depth,
+        signature=py_node.signature,
+        doc_comment=py_node.doc_comment,
+        snippet=py_node.snippet,
+    )
+
+
+def _convert_function_context(py_ctx) -> FunctionContext:
+    """Convert a PyFunctionContext from the Rust extension to a Python FunctionContext."""
+    return FunctionContext(
+        symbol=_convert_call_chain_node(py_ctx.symbol),
+        callers=[_convert_call_chain_node(n) for n in py_ctx.callers],
+        callees=[_convert_call_chain_node(n) for n in py_ctx.callees],
+        hierarchy=[_convert_call_chain_node(n) for n in py_ctx.hierarchy],
     )
 
 
@@ -623,6 +649,39 @@ class Engine:
                 return [_convert_symbol(s) for s in py_syms]
             except Exception as e:
                 raise SearchError(f"get_file_outline failed: {e}") from e
+
+    def get_function_context(
+        self,
+        symbol_id: str,
+        *,
+        max_depth: int = 3,
+        max_fanout: int = 50,
+        trace_id: Optional[str] = None,
+    ) -> FunctionContext:
+        """Get structured function context for a symbol.
+
+        Returns callers, callees, and hierarchy (parent class/module + siblings)
+        around the given symbol, obtained by traversing the code graph.
+
+        Args:
+            symbol_id: Hex symbol ID string.
+            max_depth: Maximum traversal depth (default 3, max 5).
+            max_fanout: Maximum neighbors per node (default 50, max 200).
+            trace_id: Optional trace ID for correlation.
+
+        Returns:
+            FunctionContext with the root symbol and its callers, callees,
+            and hierarchy neighbors.
+        """
+        trace_id = trace_id or uuid.uuid4().hex[:16]
+        with structlog.contextvars.bound_contextvars(trace_id=trace_id):
+            try:
+                py_ctx = self._core.get_function_context(
+                    symbol_id, max_depth, max_fanout, trace_id=trace_id
+                )
+                return _convert_function_context(py_ctx)
+            except Exception as e:
+                raise SearchError(f"get_function_context failed: {e}") from e
 
     def embed_all(self, *, trace_id: Optional[str] = None) -> int:
         """Compute and store embeddings for all indexed symbols.

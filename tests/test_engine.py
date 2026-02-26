@@ -3,7 +3,7 @@
 import pytest
 
 from openace.engine import Engine
-from openace.types import IndexReport, SearchResult, Symbol
+from openace.types import IndexReport, SearchResult, Symbol, FunctionContext, CallChainNode
 from openace.exceptions import OpenACEError
 
 
@@ -205,3 +205,39 @@ class TestEngineIncrementalIndex:
         # Force full should reindex everything
         report = engine.index(force_full=True)
         assert report.files_indexed >= 2
+
+
+class TestEngineFunctionContext:
+    def test_function_context_returns_result(self, sample_project):
+        """get_function_context should return a FunctionContext for a valid symbol."""
+        engine = Engine(str(sample_project))
+        engine.index()
+
+        symbols = engine.find_symbol("process_data")
+        assert len(symbols) > 0
+
+        ctx = engine.get_function_context(symbols[0].id)
+        assert isinstance(ctx, FunctionContext)
+        assert isinstance(ctx.symbol, CallChainNode)
+        assert ctx.symbol.name == "process_data"
+        assert ctx.symbol.depth == 0
+
+    def test_function_context_callees(self, sample_project):
+        """process_data calls validate, so callees should be non-empty."""
+        engine = Engine(str(sample_project))
+        engine.index()
+
+        symbols = engine.find_symbol("process_data")
+        assert len(symbols) > 0
+
+        ctx = engine.get_function_context(symbols[0].id)
+        callee_names = [n.name for n in ctx.callees]
+        assert "validate" in callee_names, f"Expected 'validate' in callees, got: {callee_names}"
+
+    def test_function_context_nonexistent_symbol(self, sample_project):
+        """get_function_context should raise for a nonexistent symbol ID."""
+        engine = Engine(str(sample_project))
+        engine.index()
+
+        with pytest.raises(Exception):
+            engine.get_function_context("0" * 32)

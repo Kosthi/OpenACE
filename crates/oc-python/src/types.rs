@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 
 use oc_core::{CodeRelation, CodeSymbol, RelationKind, SymbolKind};
 use oc_indexer::{IndexReport, IncrementalIndexResult};
-use oc_retrieval::{ChunkInfo, SearchResult};
+use oc_retrieval::{CallChainNode, ChunkInfo, FunctionContext, SearchResult};
 
 /// Python-compatible symbol representation.
 #[pyclass(frozen)]
@@ -387,6 +387,94 @@ impl PySummaryChunk {
             "SummaryChunk(file={:?}, language={:?})",
             self.file_path, self.language
         )
+    }
+}
+
+/// Python-compatible call chain node.
+#[pyclass(frozen)]
+#[derive(Clone)]
+pub struct PyCallChainNode {
+    #[pyo3(get)]
+    pub symbol_id: String,
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub qualified_name: String,
+    #[pyo3(get)]
+    pub kind: String,
+    #[pyo3(get)]
+    pub file_path: String,
+    #[pyo3(get)]
+    pub line_range: (u32, u32),
+    #[pyo3(get)]
+    pub depth: u32,
+    #[pyo3(get)]
+    pub signature: Option<String>,
+    #[pyo3(get)]
+    pub doc_comment: Option<String>,
+    #[pyo3(get)]
+    pub snippet: Option<String>,
+}
+
+#[pymethods]
+impl PyCallChainNode {
+    fn __repr__(&self) -> String {
+        format!(
+            "CallChainNode(name={:?}, kind={:?}, depth={}, file={:?})",
+            self.name, self.kind, self.depth, self.file_path
+        )
+    }
+}
+
+impl From<CallChainNode> for PyCallChainNode {
+    fn from(n: CallChainNode) -> Self {
+        Self {
+            symbol_id: format!("{}", n.symbol_id),
+            name: n.name,
+            qualified_name: n.qualified_name,
+            kind: kind_to_string(n.kind),
+            file_path: n.file_path,
+            line_range: n.line_range,
+            depth: n.depth,
+            signature: n.signature,
+            doc_comment: n.doc_comment,
+            snippet: n.snippet,
+        }
+    }
+}
+
+/// Python-compatible function context.
+#[pyclass(frozen)]
+#[derive(Clone)]
+pub struct PyFunctionContext {
+    #[pyo3(get)]
+    pub symbol: PyCallChainNode,
+    #[pyo3(get)]
+    pub callers: Vec<PyCallChainNode>,
+    #[pyo3(get)]
+    pub callees: Vec<PyCallChainNode>,
+    #[pyo3(get)]
+    pub hierarchy: Vec<PyCallChainNode>,
+}
+
+#[pymethods]
+impl PyFunctionContext {
+    fn __repr__(&self) -> String {
+        format!(
+            "FunctionContext(symbol={:?}, callers={}, callees={}, hierarchy={})",
+            self.symbol.name, self.callers.len(), self.callees.len(), self.hierarchy.len()
+        )
+    }
+}
+
+impl From<FunctionContext> for PyFunctionContext {
+    fn from(ctx: FunctionContext) -> Self {
+        Self {
+            symbol: PyCallChainNode::from(ctx.symbol),
+            callers: ctx.callers.into_iter().map(PyCallChainNode::from).collect(),
+            callees: ctx.callees.into_iter().map(PyCallChainNode::from).collect(),
+            hierarchy: ctx.hierarchy.into_iter().map(PyCallChainNode::from).collect(),
+        }
     }
 }
 

@@ -245,6 +245,28 @@ def create_server(engine: Engine, *, auto_index: bool = False):
                     "required": ["path"],
                 },
             ),
+            Tool(
+                name="get_function_context",
+                description="Get structured call chain context for a symbol: "
+                "who calls it (callers), what it calls (callees), and its "
+                "structural hierarchy (parent class/module and siblings). "
+                "Requires a symbol_id obtained from find_symbol or semantic_search.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "symbol_id": {
+                            "type": "string",
+                            "description": "Hex symbol ID (32 characters) from find_symbol or search results",
+                        },
+                        "max_depth": {
+                            "type": "integer",
+                            "description": "Maximum traversal depth (default: 3, max: 5)",
+                            "default": 3,
+                        },
+                    },
+                    "required": ["symbol_id"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -258,6 +280,8 @@ def create_server(engine: Engine, *, auto_index: bool = False):
                 return await _handle_find_symbol(engine, arguments)
             elif name == "get_file_outline":
                 return await _handle_file_outline(engine, arguments)
+            elif name == "get_function_context":
+                return await _handle_function_context(engine, arguments)
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
         except OpenACEError as e:
@@ -350,3 +374,46 @@ async def _handle_file_outline(engine: Engine, args: dict) -> list:
         )
 
     return [TextContent(type="text", text="\n".join(lines))]
+
+
+async def _handle_function_context(engine: Engine, args: dict) -> list:
+    from mcp.types import TextContent
+
+    symbol_id = args["symbol_id"]
+    max_depth = args.get("max_depth", 3)
+
+    ctx = await asyncio.to_thread(
+        engine.get_function_context, symbol_id, max_depth=max_depth
+    )
+
+    parts = []
+
+    # Root symbol
+    sym = ctx.symbol
+    parts.append(
+        f"Symbol: {sym.name} ({sym.kind})\n"
+        f"  File: {sym.file_path}:{sym.line_range[0]}-{sym.line_range[1]}\n"
+        f"  Qualified: {sym.qualified_name}"
+    )
+    if sym.signature:
+        parts.append(f"  Signature: {sym.signature}")
+
+    def _format_nodes(label: str, nodes: list) -> None:
+        if not nodes:
+            parts.append(f"\n{label}: (none)")
+            return
+        parts.append(f"\n{label} ({len(nodes)}):")
+        for node in nodes:
+            depth_prefix = "  " * node.depth
+            sig = f" - {node.signature}" if node.signature else ""
+            parts.append(
+                f"  {depth_prefix}{node.name} ({node.kind}) "
+                f"{node.file_path}:{node.line_range[0]}-{node.line_range[1]}"
+                f"{sig}"
+            )
+
+    _format_nodes("Callers", ctx.callers)
+    _format_nodes("Callees", ctx.callees)
+    _format_nodes("Hierarchy", ctx.hierarchy)
+
+    return [TextContent(type="text", text="\n".join(parts))]

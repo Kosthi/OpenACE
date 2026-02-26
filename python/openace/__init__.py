@@ -13,7 +13,8 @@ def __getattr__(name):
     if name == "Engine":
         from openace.engine import Engine
         return Engine
-    if name in ("Symbol", "SearchResult", "IndexReport", "Relation"):
+    if name in ("Symbol", "SearchResult", "IndexReport", "Relation",
+                 "CallChainNode", "FunctionContext"):
         from openace import types
         return getattr(types, name)
     if name in ("OpenACEError", "IndexingError", "SearchError", "StorageError"):
@@ -28,6 +29,8 @@ __all__ = [
     "SearchResult",
     "Symbol",
     "Relation",
+    "CallChainNode",
+    "FunctionContext",
     "OpenACEError",
     "IndexingError",
     "SearchError",
